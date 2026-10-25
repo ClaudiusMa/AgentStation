@@ -1,0 +1,14 @@
+{
+  "name": "agentstation",
+  "version": "0.1.0",
+  "private": true,
+  "license": "MIT",
+  "repository": "github:ClaudiusMa/AgentStation",
+  "description": "Live view of every AI coding agent on this Mac (Claude Code, Codex, Cursor).",
+  "type": "module",
+  "engines": { "node": ">=18" },
+  "scripts": {
+    "start": "node server.mjs",
+    "collect": "node lib/collect.mjs"
+  }
+}

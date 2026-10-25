@@ -1,0 +1,30 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024">
+  <!-- AgentStation icon: a hand-inked station on warm paper, after BART. The yellow line band, a stop dot, and one
+       passenger (Claude orange) standing on the platform with the "…" tag over its head. -->
+  <defs>
+    <clipPath id="sq"><rect x="100" y="100" width="824" height="824" rx="186"/></clipPath>
+  </defs>
+  <g clip-path="url(#sq)">
+    <rect x="100" y="100" width="824" height="824" fill="#f2efe7"/>
+    <!-- platform slab -->
+    <path d="M100 640 L924 640 L924 924 L100 924 Z" fill="#ddd6c5"/>
+    <path d="M100 640 L924 640 L924 672 L100 672 Z" fill="#f4f0e6"/>
+    <rect x="100" y="690" width="824" height="18" fill="#f2c230"/>
+    <!-- the line -->
+    <rect x="100" y="420" width="824" height="52" fill="#f5d20c"/>
+    <rect x="100" y="420" width="824" height="52" fill="none" stroke="#231e16" stroke-width="10"/>
+    <!-- stop dot -->
+    <circle cx="512" cy="446" r="78" fill="#f2efe7" stroke="#231e16" stroke-width="16"/>
+    <circle cx="512" cy="446" r="30" fill="#231e16"/>
+    <!-- passenger -->
+    <rect x="648" y="548" width="92" height="120" rx="24" fill="#2c2925"/>
+    <path d="M620 400 h148 a46 46 0 0 1 46 46 v150 a26 26 0 0 1 -26 26 h-188 a26 26 0 0 1 -26 -26 v-150 a46 46 0 0 1 46 -46 z" fill="#e2774f" stroke="#231e16" stroke-width="12"/>
+    <circle cx="694" cy="334" r="84" fill="#2b2420"/>
+    <ellipse cx="700" cy="352" rx="68" ry="64" fill="#f8e9cf"/>
+    <circle cx="694" cy="334" r="84" fill="none" stroke="#231e16" stroke-width="12"/>
+    <!-- "…" tag -->
+    <rect x="440" y="236" width="150" height="86" rx="43" fill="#fff4d6" stroke="#231e16" stroke-width="12"/>
+    <circle cx="480" cy="279" r="13" fill="#231e16"/><circle cx="515" cy="279" r="13" fill="#231e16"/><circle cx="550" cy="279" r="13" fill="#231e16"/>
+  </g>
+  <rect x="100" y="100" width="824" height="824" rx="186" fill="none" stroke="#231e16" stroke-width="22"/>
+</svg>

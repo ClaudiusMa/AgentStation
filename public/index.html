@@ -1,0 +1,676 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Agent Line</title></head><body>
+<script src="core.js"></script>
+<script>
+/* AgentStation: every AI agent on this Mac as passengers on a hand-inked railway (Colorfigures engine, MIT).
+   Station = project with an open agent. Closed sessions walk off. Sub-agents follow their parent like a tour group.
+   The figure is always one platform (x = depth 100, y = length 210, z = 60): track at the back (low x), platform at
+   the front, the train pulls in. Above it, a straight line diagram of every station, like a subway map: click a
+   station to go there. The train runs back and forth along that line (asTrain.s, line units, SP between stations).
+   Every open agent stands on its platform: an idle one is waiting on the user's feedback, so it still counts as working. */
+const W = 100, D = 210, H = 60;
+// the platform, after the reference: a thin base board (top z = BZ), a deep platform slab (top z = PT) from x = PX0
+// to the front, the track sunk in a trench behind it, a back wall, and screen doors along the platform edge
+const BZ = 3, PT = 24, PX0 = 40;
+// after BART: grey concrete, the brown tile of the Market Street stations, unpainted aluminium cars with the white
+// fibreglass nose of the legacy A-car, amber LED boards, black Helvetica signs
+const CONC = { l:'#dcd8cf', m:'#c0bbb0', d:'#908a7e' };
+const WALL = { l:'#a8775a', m:'#875b42', d:'#593a29' };
+const TILE = '#4a2f20';
+const SIGN = { l:'#3a3a3a', m:'#262626', d:'#141414' };
+const LED = '#161616', LED_TX = '#ffb43a', HAIR = '#2b2420';
+const BALLAST = { l:'#cfcac0', m:'#b3ada2', d:'#85806f' };
+const TIE = { l:'#c4c1b9', m:'#a7a49c', d:'#77746c' };
+const CARM = { l:'#e4e7ea', m:'#bfc6cc', d:'#838c94' };
+const NOSE = { l:'#f3f3ee', m:'#d2d3cc', d:'#999a92' };
+const WALL_H = 56, NOSE_L = 15;
+const HELV = '"Helvetica Neue",Helvetica,Arial,sans-serif';
+const txH = (...a) => tx(...a).replace('ui-monospace,Menlo,monospace', HELV).replace('letter-spacing=".04em"', 'letter-spacing=".02em"');
+const LEGS = { l:'#5d5852', m:'#45413c', d:'#2c2925' };
+const TOOLM = { claude: matOf('#e2774f'), codex: matOf('#5b82d4'), cursor: matOf('#5e5852'), spare: matOf('#d9d2c3') };
+const TOOLN = { claude:'CLAUDE', codex:'CODEX', cursor:'CURSOR' };
+const HEAD = '#f8e9cf', CABIN = '#3d433f', GLASS = '#cfe6ea';
+const esc = s => String(s).replace(/[&<>"]/g, c => ({ '&':'&amp;', '<':'&lt;', '>':'&gt;', '"':'&quot;' })[c]);
+const clamp = (v, a, b) => Math.max(a, Math.min(b, v));
+const Q = new URLSearchParams(location.search);
+const DEMO = Q.get('demo') === '1' || location.protocol === 'file:';
+const SP = 40;                     // line units between neighbouring stations
+const POOL = 9;                    // passengers in all: a station's open agents stand on its platform, the rest ride the train
+
+/* ---------- live data ---------- */
+let STATIONS = [];                 // [{ project, working, idle, total, s }]
+const AGENTS = new Map();          // id -> latest agent record
+const PEOPLE = new Map();          // id -> drawn person { id, st, state, x, y, alpha, fade, leader }
+let HI = null;                     // the picked session: its passenger stands on a ring, its card is outlined
+// what a session is up to, in the three words the whole page uses: busy (working), ask (waiting on you), done (finished, unread)
+const kindOf = a => a.status === 'working' ? 'busy' : a.ask ? 'ask' : 'done';
+const agentsAt = name => [...PEOPLE.values()].filter(p => p.st === name && p.state === 'platform').map(p => AGENTS.get(p.id)).filter(Boolean);
+// one number per open session at the station, stable while it stays open: the oldest is 1 (its platform spot comes first
+// too); sub-agents take their parent's number and a letter (1a, 1b…)
+function numbering(name = state0.station){
+  const here = agentsAt(name), out = new Map();
+  const top = here.filter(a => !a.parentId || !here.some(b => b.id === a.parentId)).sort((a, b) => (a.startedAt || 0) - (b.startedAt || 0));
+  top.forEach((a, i) => { out.set(a.id, String(i + 1));
+    here.filter(k => k.parentId === a.id).sort((x, y) => (x.startedAt || 0) - (y.startedAt || 0)).forEach((k, j) => out.set(k.id, (i + 1) + String.fromCharCode(97 + j))); });
+  return out;
+}
+let LIVE = { mode: DEMO ? 'demo' : 'connecting', at: 0 };
+
+function layoutStations(list){
+  const keep = list.slice().sort((a, b) => b.lastActive - a.lastActive).slice(0, 12).sort((a, b) => a.project.localeCompare(b.project));
+  STATIONS = keep.map((x, i) => ({ ...x, s: i*SP }));
+}
+const stationOf = name => STATIONS.find(x => x.project === name);
+
+function applyState(state){
+  stripDirty = true;
+  LIVE.at = Date.now();
+  const seen = new Set();
+  // stations: only projects with an open agent (working, or idle and waiting on the user)
+  const st = new Map();
+  for (const a of state.agents || []){ const x = st.get(a.project); if (!x || a.lastActive > x.lastActive) st.set(a.project, { project: a.project, lastActive: a.lastActive }); }
+  const prev = STATIONS.map(x => x.project).join('|');
+  layoutStations([...st.values()]);
+  if (STATIONS.map(x => x.project).join('|') !== prev){ asTrain.s = mod(asTrain.s, loopLen()); stripDirty = true; }
+  if (!stationOf(state0.station) && STATIONS.length){
+    const busy = STATIONS.map(x => [x, (state.agents || []).filter(a => a.project === x.project).length]).sort((a, b) => b[1] - a[1]);
+    state0.station = busy[0][0].project;
+  }
+  // the page opens with the train just out of sight to the left of the first station, about to slide in
+  if (!asTrain.placed && stationOf(state0.station)){ asTrain.placed = true; const T = asTrain, me = stationOf(state0.station);
+    T.s = mod(me.s - SP/2 + .02, loopLen()); T.v = 0; T.dir = 1; T.mode = 'run'; T.at = null; T.target = me.project; }
+  for (const a of state.agents || []){
+    seen.add(a.id); AGENTS.set(a.id, a);
+    let p = PEOPLE.get(a.id);
+    if (!p){ p = { id: a.id, st: a.project, state: null, x: 0, y: 0, alpha: 0, fade: 1 }; PEOPLE.set(a.id, p); }
+    p.st = a.project; p.fade = 1;
+    // an idle session is waiting on the user's feedback, so it still counts as working: everyone open stays on the platform
+    if (p.state !== 'platform') toPlatform(p);
+  }
+  for (const [id, p] of PEOPLE) if (!seen.has(id) && p.state !== 'leaving'){
+    p.state = 'leaving'; p.fade = -1;
+  }
+}
+// an agent opens: it fades in at its spot on the platform
+function toPlatform(p){
+  if (p.state === null){ p.alpha = 0; p.placeOnNextLayout = true; if (p.st === spareAt && !visit.out) p.arrive = true; }
+  p.state = 'platform';
+}
+
+/* ---------- the train ---------- */
+const CAR_LEN = 180, STOP_Y = D/2 - CAR_LEN/2, DOORS = [30, 80, 130], DOOR_W = 20;
+/* The line is a loop: station i sits at i*SP and after the last one the train comes round to the first. It runs
+   forward (dir = 1) and stops DWELL seconds at every station; the view is always where the train is, so a page left
+   open loops through every project. Previous / Next (or a stop on the line) call the train there the short way round,
+   and the view goes with it: it changes only as the train passes each station. */
+const asTrain = { s: 0, dir: 1, v: 0, mode: 'run', dwell: 0, t: 0, at: null, target: null, open: 0, placed: false };
+const trainAt = () => asTrain.mode === 'dwell' ? asTrain.at : null;
+const DWELL = 12;
+const loopLen = () => Math.max(1, STATIONS.length)*SP;
+const mod = (v, L) => ((v % L) + L) % L;
+// signed distance from a to b along the loop, the short way round: in (-L/2, L/2]
+const around = (from, to) => { const L = loopLen(); let d = mod(to - from, L); if (d > L/2) d -= L; return d; };
+// distance from the train to a point along the loop in its direction of travel, in [-.5, L-.5): a stop the train is
+// within half a unit of reads as 0, not as a whole lap away
+const aheadOf = (T, p) => mod((p - T.s)*T.dir + .5, loopLen()) - .5;
+function nextStop(){
+  const T = asTrain;
+  if (T.target && stationOf(T.target)) return stationOf(T.target);
+  // the stop just left does not count; the one about to be reached does, even in the last half unit
+  let best = null, bd = 1e9;
+  for (const x of STATIONS){ const d = aheadOf(T, x.s); if (d <= -.5 || (x.project === T.from && d < .5) || d >= bd) continue; bd = d; best = x; }
+  return best;
+}
+// the view is the station the train is standing at; on a run it is the station just behind the train until the
+// halfway point, then the next one ahead (whether or not the train will stop there), so every platform sees the
+// train slide in from the left and, if it is passing through, out to the right
+function syncView(){
+  if (!STATIONS.length) return;
+  const T = asTrain, L = loopLen();
+  let want = T.mode === 'dwell' ? T.at : null;
+  if (!want){
+    let ahead = null, ad = 1e9, behind = null, bd = 1e9;
+    for (const x of STATIONS){
+      const d = aheadOf(T, x.s); if (d > .5 && d < ad){ ad = d; ahead = x; }
+      const e = mod((T.s - x.s)*T.dir + .5, L) - .5; if (e < bd){ bd = e; behind = x; }
+    }
+    want = (ahead && ad <= SP/2 ? ahead : behind)?.project;
+  }
+  if (want && want !== state0.station){ state0.station = want; HI = null; stripDirty = true; figEnter(); }
+}
+// the figure and its counters ease in when the view moves to the next station (the world slides past the way a
+// window seat sees it: left when the train runs right)
+function figEnter(){
+  for (const id of ['fig', 'stats']){ const el = document.getElementById(id); if (!el) continue;
+    el.style.setProperty('--dx', (asTrain.dir*22) + 'px'); el.style.animation = 'none'; void el.offsetWidth; el.style.animation = 'stationin .55s ease-out'; }
+}
+function tickTrain(dt){
+  const T = asTrain, L = loopLen();
+  if (T.mode === 'dwell'){
+    T.t += dt; T.dwell -= dt;
+    // the doors stay open while people are still getting off or on (up to 40 s, so nothing can hold the train for good)
+    if (T.at === spareAt && stopBusy(dt) && T.t < 40) T.dwell = Math.max(T.dwell, .7);
+    T.open = clamp(Math.min(T.t / .6, T.dwell / .6), 0, 1);
+    if (T.dwell <= 0){ T.mode = 'run'; T.from = T.at; T.at = null; T.open = 0; }
+    syncView();
+    return;
+  }
+  const stop = nextStop(); if (!stop) return;
+  if (T.target) T.dir = Math.sign(around(T.s, stop.s)) || 1;      // a called train takes the short way round
+  const dist = aheadOf(T, stop.s), express = !!T.target, vmax = express ? 60 : 40;
+  T.v = Math.min(vmax, T.v + 30*dt, Math.sqrt(2*28*Math.max(0, dist)) + 2);
+  T.s = mod(T.s + T.dir*Math.min(T.v*dt, dist), L);
+  if (dist - T.v*dt <= .05){
+    T.s = stop.s; T.v = 0; T.dir = 1; T.mode = 'dwell'; T.at = stop.project; T.from = null; T.t = 0; T.dwell = DWELL; T.target = null;
+    // every stop here runs the same way: the spares on board get off, wait, and get back on
+    if (T.at === spareAt){ visit = { out: false, calm: 0 }; for (const q of SPARES) if (q.state === 'train') q.state = 'riding'; }
+  }
+  syncView();
+}
+
+/* ---------- walking + slots (platform units) ---------- */
+const SLOT_Y = [66, 146, 40, 172, 84, 128, 20, 192];
+const GAPS = DOORS.map(d => STOP_Y + d + DOOR_W/2);   // where the train's doors (and the screen-door gaps) are
+function slotsFor(name){
+  const out = new Map(), here = [...PEOPLE.values()].filter(p => p.st === name);
+  const plat = here.filter(p => p.state === 'platform' || p.state === 'leaving');
+  const ag = id => AGENTS.get(id) || {};
+  const leaders = plat.filter(p => !ag(p.id).parentId || !plat.some(q => q.id === ag(p.id).parentId))
+    .sort((a, b) => (ag(a.id).startedAt || 0) - (ag(b.id).startedAt || 0));
+  leaders.forEach((p, i) => {
+    const y = SLOT_Y[i % SLOT_Y.length] + Math.floor(i / SLOT_Y.length)*9, x = 80;
+    out.set(p.id, [x, y]);
+    plat.filter(q => ag(q.id).parentId === p.id).forEach((c, k) => out.set(c.id, [x + 8*(k % 2 + 1), y + Math.floor(k / 2)*8]));
+  });
+  return out;
+}
+/* ---------- the stop: off first, then on ----------
+   Every station has POOL people. Picking a station sends the train there with all of them aboard: the station's
+   open agents (in their tool's colours) and the spares (grey, POOL less the agents). When the doors open everyone
+   gets off; the agents walk to their spots and stay, the spares wait on the boarding marks, then get back on and
+   ride away. Picking a station starts this again. */
+let SPARES = [], spareAt = null, visit = { out: false, calm: 0 };
+const gapNear = y => GAPS.reduce((b, g) => Math.abs(g - y) < Math.abs(b - y) ? g : b);
+function queueSpot(i){ const g = GAPS[i % GAPS.length], k = Math.floor(i / GAPS.length); return [54 + 8*Math.floor(k / 2), g + (k % 2 ? 4 : -4)]; }
+const arriving = () => [...PEOPLE.values()].filter(p => p.arrive && p.st === spareAt);
+function syncSpares(){
+  const name = state0.station; if (!name) return;
+  const want = Math.max(0, POOL - [...PEOPLE.values()].filter(p => p.st === name && p.state === 'platform').length);
+  if (spareAt !== name){
+    spareAt = name; SPARES = []; visit = { out: false, calm: 0 };
+    for (const p of PEOPLE.values()) p.arrive = p.st === name && p.state === 'platform';
+    if (trainAt() !== name && !asTrain.target) asTrain.target = name;     // the train brings everyone in
+    else visit.out = false;
+  }
+  for (const order of ['waiting', 'riding', 'train']) while (SPARES.length > want){ const i = SPARES.findIndex(q => q.state === order); if (i < 0) break; SPARES.splice(i, 1); }
+  while (SPARES.length < want){
+    const used = new Set(SPARES.map(q => q.slot)); let slot = 0; while (used.has(slot)) slot++;
+    const [x, y] = queueSpot(slot);
+    // before the first stop a new spare is aboard with the rest; after it, it turns up on the platform
+    SPARES.push({ id: 'spare' + slot, slot, state: visit.out ? 'waiting' : 'riding', x, y, tx: x, ty: y, alpha: visit.out ? 0 : 1, fade: 1 });
+  }
+}
+// while the train stands here: start the walk-off, then send the spares back on once everyone is off and settled
+function stopBusy(dt){
+  if (asTrain.t < .6) return true;                       // doors still opening
+  if (!visit.out){ visit.out = true; let i = 0;
+    for (const p of arriving()) p.exitIn = i++*.3;
+    for (const q of SPARES) if (q.state === 'riding'){ q.state = 'alighting'; q.exitIn = i++*.3; } }
+  const settling = arriving().length || SPARES.some(q => q.state === 'riding' || q.state === 'alighting' || (q.state === 'waiting' && q.moving));
+  if (settling){ visit.calm = 0; return true; }
+  if (SPARES.some(q => q.state === 'waiting')){ visit.calm += dt; if (visit.calm > .8) for (const q of SPARES) if (q.state === 'waiting') q.state = 'boarding'; return true; }
+  return SPARES.some(q => q.state === 'boarding');
+}
+// step through a door: appear just inside it, walk out through the gap, then on to where you're going
+function stepOff(p, i){ const g = GAPS[i % GAPS.length]; p.x = 30; p.y = g; p.via = [50, g]; p.alpha = 1; p.fade = 1; }
+function walk(p, dt, speed){
+  const [tx, ty] = p.via || [p.tx, p.ty];
+  const dx = tx - p.x, dy = ty - p.y, d = Math.hypot(dx, dy), step = speed*dt;
+  p.moving = d > .4 || !!p.via; p.walk = (p.walk || 0) + (p.moving ? dt : 0);
+  if (d <= step){ p.x = tx; p.y = ty; p.via = null; } else { p.x += dx/d*step; p.y += dy/d*step; }
+}
+let exitN = 0;
+function tickSpares(dt){
+  syncSpares();
+  for (const q of SPARES){
+    q.alpha = clamp(q.alpha + q.fade*dt/.8, 0, 1);
+    if (q.state === 'alighting'){ q.exitIn -= dt; if (q.exitIn > 0) continue;
+      stepOff(q, exitN++); q.state = 'waiting'; [q.tx, q.ty] = queueSpot(q.slot); }
+    if (q.state === 'boarding'){
+      const g = gapNear(q.y);
+      if (asTrain.at !== spareAt){ q.state = 'waiting'; [q.tx, q.ty] = queueSpot(q.slot); }
+      else if (Math.abs(q.y - g) > 1.5){ q.tx = 47; q.ty = g; }
+      else { q.tx = 26; q.ty = g; if (q.x < 38) q.state = 'train'; }
+    }
+    if (q.state === 'riding' || q.state === 'train') continue;
+    walk(q, dt, 30);
+  }
+}
+function tickPeople(dt){
+  tickSpares(dt);
+  const slots = new Map(); for (const x of STATIONS) for (const [k, v] of slotsFor(x.project)) slots.set(k, v);
+  for (const [id, p] of PEOPLE){
+    if (p.arrive){                                       // still aboard: steps off once the doors are open
+      if (p.state === 'leaving'){ PEOPLE.delete(id); AGENTS.delete(id); continue; }
+      if (p.exitIn == null || (p.exitIn -= dt) > 0) continue;
+      p.arrive = false; p.exitIn = null; stepOff(p, exitN++); p.placeOnNextLayout = false;
+    }
+    p.alpha = clamp(p.alpha + p.fade*dt/.8, 0, 1);
+    if (p.state === 'leaving'){
+      if (asTrain.at === p.st && asTrain.open > .9){
+        const g = GAPS.reduce((b, y) => Math.abs(y - p.y) < Math.abs(b - p.y) ? y : b);
+        p.fade = 0; p.tx = Math.abs(p.y - g) > 1.5 ? 47 : 26; p.ty = g;
+        if (p.x < 38){ PEOPLE.delete(id); AGENTS.delete(id); continue; }
+      } else { p.fade = -1; p.tx = p.x + 30; p.ty = p.y; if (p.alpha <= 0){ PEOPLE.delete(id); AGENTS.delete(id); continue; } }
+    }
+    else if (slots.has(id)){ [p.tx, p.ty] = slots.get(id); if (p.placeOnNextLayout){ p.x = p.tx; p.y = p.ty; p.placeOnNextLayout = false; } }
+    if (p.tx == null) continue;
+    walk(p, dt, 34);
+  }
+}
+
+/* ---------- drawing helpers ---------- */
+// a passenger: dark legs, a body in the tool's colour, a round head with dark hair, like the reference's figures
+function person(x, y, z0, tool, o = {}){
+  const m = TOOLM[tool] || TOOLM.cursor, z = z0 + (o.bob || 0);
+  let s = cyl(x, y, z, z + 7, 2.5, LEGS, tone, 1, 12) + cyl(x, y, z + 7, z + 15.5, 3.7, m, tone, 1.3, 14);
+  const [hx, hy] = P(x, y, z + 19), hr = 3.5*CAM_K, k = INK_K;
+  s += `<circle cx="${f(hx)}" cy="${f(hy)}" r="${f(hr)}" fill="${HAIR}"/>`
+    + `<ellipse cx="${f(hx + hr*.08)}" cy="${f(hy + hr*.24)}" rx="${f(hr*.8)}" ry="${f(hr*.74)}" fill="${HEAD}"/>`
+    + `<circle cx="${f(hx)}" cy="${f(hy)}" r="${f(hr)}" fill="none" stroke="${INK}" stroke-width="1.1"/>`;
+  // a tour guide's flag: a dark pole held at the shoulder, a bright pennant well above the group's heads
+  if (o.flag){ const b = [x + 1, y - 4.2, z + 11], t = [x + 1, y - 4.2, z + 44];
+    s += rod(b, t, .65, DARK, tone, 1) + shape([t, [x + 1, y - 19, z + 39.5], [x + 1, y - 4.2, z + 35]], '#f4b829', 1.3)
+      + `<circle cx="${f(P(...t)[0])}" cy="${f(P(...t)[1])}" r="${f(1.1*CAM_K)}" fill="${INK}"/>`; }
+  // the name tag over the head: the passenger's number (the same number as its card under the line) and what it is up to:
+  // "…" working (cream), "?" asking you something (lime), "✓" finished and waiting to be read (paper)
+  if (o.tag){ const { n, kind } = o.tag, fs = 6.9, mono = 'ui-monospace,Menlo,monospace';
+    const wN = String(n).length*fs*.66 + 3, wG = kind === 'busy' ? 12 : 8, w = wN + wG + 2.5, h = 9.6;
+    const bx = hx + hr*1.1, by = hy - hr*2.3, fillC = kind === 'ask' ? 'var(--accent)' : kind === 'busy' ? '#fff4d6' : '#f2efe7';
+    s += `<rect x="${f(bx)}" y="${f(by - h/2)}" width="${f(w)}" height="${f(h)}" rx="${f(h/2)}" fill="${fillC}" stroke="${INK}" stroke-width="1"/>`
+      + `<text x="${f(bx + 1.5 + wN/2)}" y="${f(by + fs*.36)}" font-size="${fs*.9}" text-anchor="middle" font-family="${mono}" font-weight="600" fill="#6d6558">${n}</text>`
+      + `<path d="M${f(bx + wN + 2)} ${f(by - h/2 + 1.6)}V${f(by + h/2 - 1.6)}" stroke="${INK}" stroke-width=".6" opacity=".45"/>`;
+    const gx = bx + wN + 2 + wG/2 + .3;
+    if (kind === 'busy'){ const t = performance.now()/1000;
+      for (let i = 0; i < 3; i++) s += `<circle cx="${f(gx - 3.4 + i*3.4)}" cy="${f(by + .8 - Math.max(0, Math.sin(t*7 - i*.9))*1.5)}" r="1.1" fill="${INK}"/>`; }
+    else s += `<text x="${f(gx)}" y="${f(by + fs*.36)}" font-size="${fs}" text-anchor="middle" font-family="${mono}" font-weight="800" fill="${INK}">${kind === 'ask' ? '?' : '✓'}</text>`; }
+  if (o.alpha != null && o.alpha < 1) s = `<g opacity="${f(o.alpha)}">${s}</g>`;
+  return s;
+}
+const personShadow = (x, y, z0) => castShadow([...on(PZ(z0), ellUV(x, y, 3.7, 3.7, 10)), [x, y, z0 + 22]], z0);
+
+/* ---------- platform scene ---------- */
+// the train's long side at x = xs (sg = +1 the side facing the platform): stripe, windows with riders, doors, sign
+function carSide(ty, xs, sg, open, riders){
+  const X = xs + sg*.35, Pt = (y, z) => [X, y, z], R = (y0, y1, z0, z1) => [Pt(y0, z0), Pt(y1, z0), Pt(y1, z1), Pt(y0, z1)];
+  let s = '';
+  for (const z0 of [29.4, 31.9]) s += fill(pd(R(ty + 2, ty + CAR_LEN - 2, z0, z0 + 1.1)), 'var(--accent)');   // the double stripe
+  const wins = [[ty + 6, ty + 26], [ty + 54, ty + 76], [ty + 104, ty + 126], [ty + 154, ty + 174]];
+  wins.forEach(([y0, y1], wi) => {
+    let inner = fill(pd(R(y0, y1, 35, 48)), CABIN);
+    riders.filter((_, i) => i % 4 === wi).slice(0, 3).forEach((r, k) => {
+      const yy = y0 + 4.5 + k*7.5, zx = xs - sg*5, m = TOOLM[r.tool] || TOOLM.cursor;
+      inner += shape([[zx, yy - 3.9, 35], [zx, yy + 3.9, 35], [zx, yy + 3.9, 40.8], [zx, yy - 3.9, 40.8]], m.l, .8);
+      const [hx, hy] = P(zx, yy, 44), hr = 3.4*CAM_K;
+      inner += `<circle cx="${f(hx)}" cy="${f(hy)}" r="${f(hr)}" fill="${HAIR}"/><ellipse cx="${f(hx)}" cy="${f(hy + hr*.24)}" rx="${f(hr*.8)}" ry="${f(hr*.74)}" fill="${HEAD}"/>`
+        + `<circle cx="${f(hx)}" cy="${f(hy)}" r="${f(hr)}" fill="none" stroke="${INK}" stroke-width=".9"/>`;
+    });
+    s += clipTo(R(y0, y1, 35, 48), inner) + `<path d="${pd(R(y0, y1, 35, 48))}" fill="${GLASS}" opacity=".3"/>`
+      + `<path d="${pd([Pt(y0 + 3, 46.5), Pt(y0 + 10, 36)], false)}" stroke="#fff" stroke-width="1.6" opacity=".45"/>` + ink(pd(R(y0, y1, 35, 48)), 1.3);
+  });
+  for (const d of DOORS){
+    const y0 = ty + d, y1 = y0 + DOOR_W, sl = open*(DOOR_W/2 - 1);
+    s += fill(pd(R(y0, y1, 24, 51)), CABIN);
+    for (const [a, b] of [[y0 - sl, y0 + DOOR_W/2 - sl], [y0 + DOOR_W/2 + sl, y1 + sl]]){
+      const aa = Math.max(a, y0 - DOOR_W/2 + 1), bb = Math.min(b, y1 + DOOR_W/2 - 1);
+      s += shape(R(aa, bb, 24, 51), mix(CARM.l, CARM.m, .35), .9) + fill(pd(R(aa + 2, bb - 2, 36, 47)), CABIN) + `<path d="${pd(R(aa + 2, bb - 2, 36, 47))}" fill="${GLASS}" opacity=".3"/>` + ink(pd(R(aa + 2, bb - 2, 36, 47)), .8)
+        + fill(pd(R(aa, bb, 29.4, 30.5)), 'var(--accent)') + fill(pd(R(aa, bb, 31.9, 33)), 'var(--accent)');
+    }
+    s += ink(pd(R(y0, y1, 24, 51)), 1.2);
+  }
+  // the destination sign over the doors: where this train goes next, in amber
+  if (sg > 0) s += shape(R(ty + 54, ty + 82, 51.5, 54.5), LED, .8) + tx(X, ty + 68, 52.4, esc(DEST), 2.5, LED_TX, 800);
+  return s;
+}
+let DEST = 'AGENT LINE';
+// a legacy A-car cab on the end at ey, pointing sg (+1 along +y, -1 along -y): white fibreglass, the roof curving
+// down into the raked windscreen, a blue band and two headlights low on the front, a small cab window on the side.
+// The end facing us shows all of it; the other end shows as the white wedge of its silhouette.
+function nose(ey, sg){
+  const ring = (t, u0, u1, z1) => on(PY(ey + sg*t), rrUV(u0, 10, u1, z1, 4, 5));
+  const N0 = ring(0, 9, 37, 56), N1 = ring(5, 9.3, 36.7, 52.5), N2 = ring(NOSE_L, 11.5, 34.5, 29);
+  const endN = [0, sg, 0];
+  let s = loft(N0, N1, n => tone(n, NOSE)) + loft(N1, N2, n => tone(n, NOSE));
+  if (vis(endN)){
+    s += fill(pd(N2), tone(endN, NOSE)) + ink(pd(N2), 1);
+    const nz = t => 52.5 - 23.5*(t - 5)/(NOSE_L - 5);
+    const ws = [[13.5, 5.8, nz(5.8)], [32.5, 5.8, nz(5.8)], [31.4, 13.2, nz(13.2)], [14.6, 13.2, nz(13.2)]].map(([x, t, z]) => [x, ey + sg*(t + .35), z + .6]);
+    s += shape(ws, '#2c3431', 1) + fill(pd([ws[0], [ws[0][0] + 5, ws[0][1], ws[0][2]], [ws[3][0] + 7.5, ws[3][1], ws[3][2]], ws[3]]), '#fff', 'opacity=".28"');
+    const fy = ey + sg*(NOSE_L + .3);
+    s += fill(pd(on(PY(fy), rectUV(12.5, 15, 33.5, 17.6))), 'var(--accent)');
+    for (const x of [15.5, 30.5]){ const [hx, hy] = P(x, fy, 21.5); s += `<circle cx="${f(hx)}" cy="${f(hy)}" r="${f(1.7*CAM_K)}" fill="#fff3b8" stroke="${INK}" stroke-width=".9"/>`; }
+  }
+  if (vis([1, 0, 0])) s += shape([[37.1, 1, 37], [36.85, 5.5, 37], [36.85, 5.5, 48], [37.1, 1, 48]].map(([x, t, z]) => [x, ey + sg*t, z]), '#2c3431', .8);
+  return { svg: s, pts: [...N1, ...N2] };
+}
+function train(ty, open, riders){
+  const prof = rrUV(9, 10, 37, 56, 4.5, 5), A = on(PY(ty), prof), B = on(PY(ty + CAR_LEN), prof);
+  let s = '';
+  for (const yy of [ty + 18, ty + CAR_LEN - 38]) s += box(12, yy, 5.5, 34, yy + 20, 10.5, DARK, tone, .8);
+  s += loft(A, B, n => tone(n, CARM));
+  s += fill(pd(on(PZ(56.05), rectUV(13.5, ty + 1, 32.5, ty + CAR_LEN - 1))), CARM.m);     // the darker roof
+  const nA = nose(ty, -1), nB = nose(ty + CAR_LEN, 1);
+  s += nA.svg + nB.svg;
+  if (vis([1, 0, 0])) s += carSide(ty, 37, 1, open, riders);
+  if (vis([-1, 0, 0])) s += carSide(ty, 9, -1, open, riders);
+  s += hullInk([...A, ...B, ...nA.pts, ...nB.pts], 2.8);
+  for (const yy of [ty + 30, ty + 110]) s += box(14, yy, 56, 32, yy + 40, 59.5, CARM, tone, .9);
+  return s;
+}
+// the next stop for the destination sign, without turning the train round (nextStop does that at the end of the line)
+function peekNext(){ const T = asTrain; if (T.target && stationOf(T.target)) return stationOf(T.target);
+  for (const dir of [T.dir, -T.dir]){ let best = null, bd = 1e9; for (const x of STATIONS){ const d = (x.s - T.s)*dir; if (d > .5 && d < bd){ bd = d; best = x; } } if (best) return best; }
+  return null; }
+function platformScene(st){
+  const name = st.station || 'No agents yet', T = asTrain, me = stationOf(name);
+  let s = board(-6, -6, W + 6, D + 6, BZ, 8, BOARD);
+  // where the train is relative to this platform: it always pulls in from the near end and leaves past the far end
+  let ty = null, open = 0;
+  // forward is -y: the train comes in from the left of the screen and leaves to the right. One station apart on the
+  // line (SP) is 11.5 platform lengths of travel, so it has fully left one platform before it shows up on the next.
+  if (me){ const d = around(me.s, T.s); if (Math.abs(d) < 60){ ty = STOP_Y - d*11.5; open = T.at === name ? T.open : 0; } }
+  // the spare passengers ride the train: the pool less this station's open agents
+  const mine = name === spareAt;
+  const riders = mine ? [...arriving().map(p => AGENTS.get(p.id) || {}), ...SPARES.filter(q => q.state === 'riding' || q.state === 'alighting' || q.state === 'train').map(() => ({ tool: 'spare' }))] : [];
+  const spares = mine ? SPARES.filter(q => q.state === 'waiting' || q.state === 'boarding') : [];
+  DEST = (() => { const nx = T.at === name ? peekNext() : me; return (nx ? nx.project : 'AGENT LINE').toUpperCase().slice(0, 14); })();
+  let track = box(5, 0, BZ, PX0, D, BZ + 2, BALLAST, tone, 1);
+  for (let y = 5; y < D - 4; y += 13) track += box(10, y, BZ + 2, 35, y + 5, BZ + 3.2, TIE, tone, .7);
+  track += box(15, 0, BZ + 2, 17, D, BZ + 4.5, METAL, tone, .8) + box(29, 0, BZ + 2, 31, D, BZ + 4.5, METAL, tone, .8)
+    + box(34.5, 0, BZ + 2, 36.3, D, BZ + 5.2, DARK, tone, .7);                                   // the third rail
+  // the platform: grey concrete, a dark edge strip and the yellow tactile strip with its domes
+  let plat = box(PX0, 0, BZ, W, D, PT, CONC, tone, 1.6) + shape(on(PZ(PT + .05), rectUV(PX0 + 1, 1, PX0 + 4, D - 1)), CONC.d, .5)
+    + shape(on(PZ(PT + .05), rectUV(PX0 + 4, 1, PX0 + 9, D - 1)), '#f2c230', .7);
+  for (let y = 3.5; y < D - 2; y += 3.4) for (const x of [PX0 + 5.3, PX0 + 7.7]){ const [cx, cy] = P(x, y, PT + .1); plat += `<circle cx="${f(cx)}" cy="${f(cy)}" r="${f(.55*CAM_K)}" fill="#c9960f"/>`; }
+  const here = [...PEOPLE.values()].filter(p => p.st === name && !p.arrive);
+  for (const p of [...here, ...spares]) plat += `<g opacity="${f(.9*p.alpha)}">${personShadow(p.x, p.y, PT)}</g>`;
+  // the wall across the tracks: brown tile, the station's name in big white Helvetica, the line's colour under it
+  let wall = box(0, 0, BZ, 5, D, WALL_H, WALL, tone, 1.2);
+  if (vis([1, 0, 0])){ const Xw = 5.05;
+    for (let z = BZ + 5; z < WALL_H; z += 5) wall += `<path d="${pd([[Xw, 0, z], [Xw, D, z]], false)}" stroke="${TILE}" stroke-width=".3" opacity=".28"/>`;
+    for (let y = 10; y < D; y += 10) wall += `<path d="${pd([[Xw, y, BZ], [Xw, y, WALL_H]], false)}" stroke="${TILE}" stroke-width=".3" opacity=".28"/>`;
+    const nm = name.toUpperCase(), fs = Math.min(11.5, 175/(nm.length*.62));
+    wall += fill(pd([[Xw, 4, 40], [Xw, D - 4, 40], [Xw, D - 4, 41.6], [Xw, 4, 41.6]]), 'var(--accent)');
+    for (const cy of [D*.27, D*.73]) wall += txH(Xw + .05, cy, 45.5, esc(nm), fs, '#f6f3ee', 700); }
+  const parts = [
+    { box: [[0, 0, BZ], [5, D, WALL_H]], svg: wall },
+    { box: [[5, 0, BZ], [PX0, D, BZ + 5.2]], svg: track },
+    { box: [[PX0, 0, BZ], [W, D, PT]], svg: plat },
+  ];
+  if (ty != null){
+    // the train is cut off where the platform ends, as if it came out of a tunnel
+    const cut = [];
+    for (const x of [5, PX0]) for (const y of [0, D]) for (const z of [BZ, H + 2]) cut.push(P(x, y, z));
+    const id = 'trainclip' + (++_clipN);
+    // the train's sorting box starts at the top of the track (third rail included), so it always draws over the track
+    parts.push({ box: [[9, ty - NOSE_L, BZ + 5.2], [37, ty + CAR_LEN + NOSE_L, 60]], svg: `<clipPath id="${id}"><path d="${sp(hull(cut))}"/></clipPath><g clip-path="url(#${id})">${train(ty, open, riders)}</g>` }); }
+  // the station sign: a next-train board over the name board, on two posts, facing the front
+  const sy0 = 84, sy1 = 126, i = STATIONS.indexOf(me), ti = STATIONS.findIndex(x => Math.abs(x.s - T.s) < SP/2);
+  const ahead = me ? mod((me.s - T.s)*T.dir, loopLen()) : 0, away = Math.round(ahead/SP);
+  const next = !me ? '' : T.at === name ? 'AT PLATFORM' : ahead <= SP ? 'ARRIVING' : `${away} STOPS AWAY`;
+  let sign = box(71.2, sy0 + 4, PT, 72.6, sy0 + 5.4, PT + 32, DARK, tone, .7) + box(71.2, sy1 - 5.4, PT, 72.6, sy1 - 4, PT + 32, DARK, tone, .7)
+    + box(70.4, sy0, PT + 15, 73.4, sy1, PT + 26, SIGN, tone, 1.2) + box(70.6, sy0 + 3, PT + 27, 73.2, sy1 - 3, PT + 35, SIGN, tone, 1);
+  if (vis([1, 0, 0])){ const Xf = 73.55, Xl = 73.35, nm = name.slice(0, 16), cy = (sy0 + sy1)/2;
+    sign += fill(pd([[Xf, sy0 + 1, PT + 15.6], [Xf, sy1 - 1, PT + 15.6], [Xf, sy1 - 1, PT + 17.2], [Xf, sy0 + 1, PT + 17.2]]), 'var(--accent)')
+      + txH(Xf, cy, PT + 19.6, esc(nm), Math.min(6.4, 36/(nm.length*.58)), '#f6f3ee', 700)
+      + tx(Xl, cy, PT + 31.8, esc(DEST) + ' TRAIN', 2.4, LED_TX, 800) + tx(Xl, cy, PT + 28.4, esc(next), 2.6, LED_TX, 800); }
+  parts.push({ box: [[70.4, sy0, PT], [73.4, sy1, PT + 35]], svg: sign });
+  const ag = id => AGENTS.get(id) || {}, nums = numbering();
+  for (const p of here){
+    const a = ag(p.id), leads = here.some(q => ag(q.id).parentId === p.id && q.state === 'platform');
+    const bob = p.moving ? Math.abs(Math.sin(p.walk*9))*1.2 : 0;
+    const tag = p.state === 'platform' && nums.has(p.id) ? { n: nums.get(p.id), kind: kindOf(a) } : null;
+    // the picked passenger (or card) stands on a lime ring
+    if (p.id === HI){ const ring = pd(on(PZ(PT + .1), ellUV(p.x, p.y, 7.5, 7.5, 18)));
+      parts.push({ box: [[p.x - 7.5, p.y - 7.5, PT], [p.x + 7.5, p.y + 7.5, PT + .3]], svg: `<g opacity="${f(.85*p.alpha)}">${fill(ring, 'var(--accent)')}${ink(ring, 1)}</g>` }); }
+    const who = (nums.get(p.id) ? nums.get(p.id) + '  ' : '') + (a.title || 'Untitled session') + (a.ask ? ' — asks: ' + a.ask : a.summary ? ' — ' + a.summary : '');
+    parts.push({ box: [[p.x - 3.8, p.y - 3.8, PT], [p.x + 3.8, p.y + 3.8, PT + 24]],
+      svg: act('ag', `<title>${esc(who)}</title>` + person(p.x, p.y, PT, a.tool, { bob, flag: leads, tag, alpha: p.alpha }), `data-id="${esc(p.id)}"`) });
+  }
+  for (const q of spares){ const bob = q.moving ? Math.abs(Math.sin(q.walk*9))*1.2 : 0;
+    parts.push({ box: [[q.x - 3.8, q.y - 3.8, PT], [q.x + 3.8, q.y + 3.8, PT + 24]], svg: person(q.x, q.y, PT, 'spare', { bob, alpha: q.alpha }) }); }
+  s += byDepth(parts);
+  return s;
+}
+
+/* ---------- mount ---------- */
+const state0 = { station: Q.get('station') || null };
+let stripDirty = true;
+function goTo(name){
+  if (trainAt() === name) return;
+  asTrain.target = name; if (asTrain.mode === 'dwell') asTrain.dwell = Math.min(asTrain.dwell, .5);
+}
+PALS.bart = { l:'#3d9bd8', m:'#2c78ab', d:'#174a6b' };   // BART blue: the stripe on the cars, the band under the signs
+window.FIG_A = () => .58;                                  // a flatter frame than 4:3: the platform is long and low, so the list shows sooner
+const neighbour = k => { const n = STATIONS.length, i = STATIONS.findIndex(x => x.project === state0.station); return n ? STATIONS[mod(i + k, n)] : null; };
+const ui = mountFigure({
+  fig: '01', title: 'Agent Line', size: [W, D, H], palette: 'bart', state: state0,
+  scene: st => platformScene(st),
+  buttons: [
+    { label: 'Previous', onClick(st, u){ const x = neighbour(-1); if (!x) return u.flash('No station yet'); goTo(x.project); } },
+    { label: 'Next', onClick(st, u){ const x = neighbour(1); if (!x) return u.flash('No station yet'); goTo(x.project); } },
+  ],
+  stats: st => {
+    const top = agentsAt(st.station).filter(a => !a.parentId), n = k => top.filter(a => kindOf(a) === k).length;
+    return [{ label: 'Working', value: n('busy') }, { label: 'Waiting', value: n('ask') }, { label: 'Finished', value: n('done') }];
+  },
+  acts: {
+    ag(st, el, u){ pick(el.dataset.id); const card = list.querySelector(`[data-id="${CSS.escape(el.dataset.id)}"]`);
+      if (card && HI) card.scrollIntoView({ behavior: 'smooth', block: 'nearest' }); },
+  },
+});
+// pick a session from either side: the passenger gets a ring, the card an outline; picking it again lets go
+function pick(id){ HI = HI === id ? null : id; stripDirty = true; ui.render(); }
+
+// header: the station's name, a key to the colours and the feed's state
+const h1 = document.querySelector('header h1'), hdr = document.querySelector('header');
+const key = document.createElement('span'); hdr.appendChild(key); key.className = 'key';
+// the line diagram: one straight line, a stop per station, the train riding on it. Click a stop to go there.
+const strip = document.createElement('nav'); strip.className = 'line'; strip.setAttribute('aria-label', 'Stations');
+document.querySelector('.controls').before(strip);
+// the sessions at this station in plain words: what each did last and what it needs from you
+const list = document.createElement('section'); list.className = 'sessions'; list.setAttribute('aria-label', 'Sessions at this station');
+strip.after(list);
+const css = document.createElement('style');
+css.textContent = `.key i{display:inline-block;width:9px;height:9px;border-radius:50%;border:1.2px solid var(--ink);margin:0 4px 0 12px;vertical-align:-1px}
+  .mcap{display:none} .controls{display:none}
+  .sessions{width:100%;max-width:760px;margin:4px 0 28px;font:15px/1.55 -apple-system,BlinkMacSystemFont,"SF Pro Text","Segoe UI",system-ui,sans-serif;color:var(--ink)}
+  .sessions .grp{margin:22px 0 10px;display:flex;align-items:baseline;gap:10px;font:700 11px/1 ui-monospace,Menlo,monospace;letter-spacing:.12em;text-transform:uppercase;color:var(--muted)}
+  .sessions .grp::after{content:'';flex:1;border-top:1px solid var(--rule)}
+  .sessions .grp:first-child{margin-top:6px}
+  .sessions .lead{margin:0 0 4px;font-size:14.5px;line-height:1.5;color:#4d473e} .sessions .lead b{color:var(--ink);font-weight:700}
+  .sessions .lead .hint{display:block;font-size:12.5px;color:var(--muted);margin-top:2px}
+  .badge{display:inline-flex;align-items:center;justify-content:center;min-width:20px;height:20px;padding:0 6px;border-radius:10px;border:1px solid var(--rule);font:600 11px/1 ui-monospace,Menlo,monospace;background:transparent;color:var(--muted);flex:none;margin-left:auto}
+  .sessions > *,.sessions .rows > .row{animation:cardin .5s ease-out both}
+  .sessions.settled > *,.sessions.settled .rows > .row{animation:none}
+  .sessions.out > *,.sessions.out .rows > .row{animation:cardout .4s ease-in both}
+  @keyframes cardin{from{opacity:0;transform:translateY(10px)}to{opacity:1;transform:none}}
+  @keyframes cardout{from{opacity:1;transform:none}to{opacity:0;transform:translateY(-8px)}}
+  @keyframes stationin{from{opacity:0;transform:translateX(var(--dx,22px))}to{opacity:1;transform:none}}
+  .stat .v.bump{animation:none}
+  /* the counters sit at the top left of the figure, the buttons at its bottom right */
+  .stats{top:4px;left:0;right:auto;align-items:flex-start;text-align:left;gap:8px}
+  .actions{top:auto;bottom:6px;left:auto;right:0;flex-direction:row;align-items:center;gap:8px}
+  @media (max-width:560px){.stats{align-items:flex-start;justify-content:flex-start}.actions{justify-content:flex-end}}
+  .card{background:#fffdf8;border:1px solid var(--rule);border-radius:14px;padding:16px 18px;margin-bottom:10px;transition:box-shadow .2s,border-color .2s;cursor:pointer}
+  .card.hi,.row.hi{border-color:var(--ink);box-shadow:0 0 0 2px var(--ink)}
+  .card .head{display:flex;align-items:flex-start;gap:12px} .card .hd{min-width:0;flex:1} .card .head .badge{margin-top:4px}
+  .card .ttl{font-size:17px;font-weight:650;line-height:1.3;letter-spacing:-.005em;margin:2px 0 0}
+  .card .meta{display:flex;align-items:center;gap:8px;margin-top:4px;font-size:12.5px;color:var(--muted)}
+  .card .meta i{width:8px;height:8px;border-radius:50%;flex:none}
+  .card .now{margin:12px 0 0;font-size:15.5px;line-height:1.5;color:#1b1712} .card .now b{font-weight:600;color:#4d473e}
+  .card .kids{list-style:none;padding:10px 0 0;margin:12px 0 0;border-top:1px dashed var(--rule)}
+  .card .kids .lbl{font-size:12px;letter-spacing:.06em;text-transform:uppercase;color:var(--muted);margin-bottom:4px}
+  .card .kids li:not(.lbl){display:flex;align-items:center;gap:8px;font-size:14px;color:#2b2520;padding:4px 6px;margin:0 -6px;border-radius:8px}
+  .card .kids li.hi{box-shadow:0 0 0 2px var(--ink)}
+  .card .kids .badge{min-width:18px;height:18px;font-size:10px}
+  .card .q{margin:12px 0 0;font-size:15.5px;line-height:1.5;color:#1b1712}
+  .card ul.q{padding:0;list-style:none}
+  .card ul.q li{position:relative;padding-left:22px;margin:4px 0}
+  .card ul.q li::before{content:'';position:absolute;left:2px;top:.42em;width:11px;height:11px;border:1.5px solid var(--ink);border-radius:3px}
+  .card .last{margin:12px 0 0;font-size:13.5px;line-height:1.5;color:#6d6558}
+  .card .last b{font-weight:600;color:#4d473e}
+  .row{display:flex;align-items:center;gap:12px;padding:10px 6px;border-bottom:1px solid var(--rule);cursor:pointer;border-radius:8px}
+  .row:last-child{border-bottom:0}
+  .row .ttl{font-weight:600;font-size:15px;flex:none;max-width:42%}
+  .row .last{flex:1;min-width:0;font-size:13.5px;color:#6d6558;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  .row .when{font-size:12px;color:var(--muted);white-space:nowrap}
+  .rows{background:#fffdf8;border:1px solid var(--rule);border-radius:14px;padding:4px 14px}
+  .working{display:inline-flex;gap:3px;margin-right:2px} .working i{width:4px;height:4px;border-radius:50%;background:var(--ink);animation:wk 1.2s infinite} .working i:nth-child(2){animation-delay:.2s} .working i:nth-child(3){animation-delay:.4s}
+  @keyframes wk{0%,60%,100%{opacity:.25}30%{opacity:1}}
+  @media (max-width:560px){.row{flex-wrap:wrap}.row .ttl{max-width:100%}.row .last{flex-basis:100%;white-space:normal}}
+  .line{position:relative;width:100%;max-width:760px;height:44px;margin:0 0 14px;flex-shrink:0}
+  .line .rail{position:absolute;left:3%;right:3%;top:9px;height:7px;background:#f5d20c;border:1.3px solid var(--ink);border-radius:5px}
+  .line .trn{position:absolute;top:5px;width:22px;height:14px;margin-left:-11px;border-radius:5px 5px 3px 3px;background:#e4e7ea;border:1.5px solid var(--ink);box-sizing:border-box;box-shadow:inset 0 -4px 0 var(--accent);z-index:1;pointer-events:none}
+  .line .stn{all:unset;position:absolute;top:7px;transform:translateX(-50%);display:flex;flex-direction:column;align-items:center;cursor:pointer;width:var(--w)}
+  .line .dot{width:11px;height:11px;border-radius:50%;background:#fff;border:1.6px solid var(--ink);box-sizing:border-box;transition:transform .15s}
+  .line .nm{margin-top:5px;font:500 11px/1.2 ${HELV};letter-spacing:0;color:var(--muted);max-width:100%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  .line .stn.lo .nm{margin-top:15px}
+  .line .stn:hover .dot{transform:scale(1.3)} .line .stn:hover .nm{color:var(--ink)}
+  .line .stn.cur .dot{background:var(--ink);transform:scale(1.25)} .line .stn.cur .nm{color:var(--ink);font-weight:700}
+  .line .stn:focus-visible .dot{outline:2px solid var(--ink);outline-offset:3px}
+  .line .empty{position:absolute;left:0;right:0;top:22px;text-align:center;color:var(--muted);font-size:11px;letter-spacing:.08em;text-transform:uppercase}`;
+document.head.appendChild(css);
+const stopX = i => STATIONS.length < 2 ? 50 : 6 + 88*i/(STATIONS.length - 1);
+// rebuilt only when the stations themselves change (a rebuild under the pointer would eat a click); counts update in place
+function drawStrip(){
+  const sw = strip.clientWidth || 760, n = STATIONS.length, w = n < 2 ? 160 : Math.min(160, sw*.88/(n - 1)*.98), crowded = n > 1 && w < 92;
+  const sig = STATIONS.map(x => x.project).join('|') + '#' + LIVE.mode + '#' + Math.round(sw/40);
+  if (strip._sig !== sig){ strip._sig = sig;
+    strip.innerHTML = '<div class="rail"></div><i class="trn" aria-hidden="true"></i>' + STATIONS.map((x, i) =>
+      `<button class="stn${crowded && i % 2 ? ' lo' : ''}" data-p="${esc(x.project)}" style="left:${stopX(i)}%;--w:${crowded ? w*1.9 : w}px" title="${esc(x.project)}">`
+      + `<i class="dot"></i><span class="nm">${esc(x.project)}</span></button>`).join('')
+      + (n ? '' : `<div class="empty">${LIVE.mode === 'connecting' ? 'Connecting' : 'No agents open right now'}</div>`);
+    strip.querySelectorAll('.stn').forEach(b => b.onclick = () => { goTo(b.dataset.p); ui.render(); });
+  }
+  strip.querySelectorAll('.stn').forEach(b => b.classList.toggle('cur', b.dataset.p === state0.station));
+}
+const ago = ms => { const m = Math.round((Date.now() - ms)/60000); return m < 1 ? 'just now' : m < 60 ? m + ' min ago' : m < 1440 ? Math.round(m/60) + ' h ago' : Math.round(m/1440) + ' d ago'; };
+// split a multi-part ask ("do A; decide B; check C") into a checklist, keep a single question as one line
+const askParts = t => { const parts = t.split(/;\s+|\s*\n+\s*|(?<=[.?!])\s+(?=[A-Z])/).map(x => x.trim().replace(/[.;]$/, '')).filter(Boolean);
+  return parts.length > 1 ? parts : null; };
+const upFirst = t => t ? t[0].toUpperCase() + t.slice(1) : t;
+function drawList(){
+  // the list belongs to the station the train is standing at. When the doors open the entries come in one after
+  // another (%D% marks where each one's delay goes); as the doors close, 1.2 s before the train leaves, they go out
+  // the same way, and the list stays empty until the next stop
+  const atStop = trainAt() === state0.station, now = performance.now();
+  if (list._left && trainAt() !== list._left) list._left = null;             // the train has moved on: that station may show again
+  if (list._st && (!atStop || asTrain.dwell <= 2.2) && !list._out){           // the doors are closing: the entries go out one by one
+    let k = 0; list._out = now; list._left = list._st; list.classList.remove('settled'); list.classList.add('out'); clearTimeout(list._settle);
+    list.querySelectorAll(':scope > :not(.rows), .rows > .row').forEach(el => { el.style.animationDelay = (k++*.12).toFixed(2) + 's'; });
+    list.querySelectorAll(':scope > .rows').forEach(el => { el.style.animationDelay = el.lastElementChild?.style.animationDelay || '0s'; });   // the box goes with its last row
+    list._outLen = (k*.12 + .5)*1000;
+  }
+  if (list._out){ if (now - list._out >= list._outLen){ list.style.transition = 'none'; list.style.minHeight = list.offsetHeight + 'px';
+    list.innerHTML = ''; list._h = ''; list._st = null; list._out = 0; list.classList.remove('out'); } return; }
+  if (!atStop || list._left === state0.station) return;
+  const here = agentsAt(state0.station), nums = numbering();
+  const top = here.filter(a => !a.parentId || !here.some(b => b.id === a.parentId)).sort((a, b) => (a.startedAt || 0) - (b.startedAt || 0));
+  const kidsOf = a => here.filter(k => k.parentId === a.id).sort((x, y) => (x.startedAt || 0) - (y.startedAt || 0));
+  const badge = a => `<span class="badge" title="passenger ${nums.get(a.id) || ''} on the platform">${nums.get(a.id) || ''}</span>`;
+  const tool = a => TOOLN[a.tool] ? TOOLN[a.tool][0] + TOOLN[a.tool].slice(1).toLowerCase() : '';
+  const meta = a => `<i style="background:${(TOOLM[a.tool] || TOOLM.cursor).l}"></i>${tool(a)}${a.model ? ' · ' + esc(a.model.replace(/^claude-/, '').replace(/-\d+(-\d+)*$/, '')) : ''} · ${ago(a.lastActive)}`;
+  const dots = '<span class="working"><i></i><i></i><i></i></span>';
+  const head = (a, extra = '') => `<div class="head"><div class="hd"><h3 class="ttl">${esc(a.title || 'Untitled session')}</h3><div class="meta">${extra}${meta(a)}</div></div>${badge(a)}</div>`;
+  const kids = a => { const k = kidsOf(a); return k.length ? `<ul class="kids"><li class="lbl">${k.length} sub-agent${k.length > 1 ? 's' : ''} working for it</li>` + k.map(x =>
+    `<li data-id="${esc(x.id)}"${x.id === HI ? ' class="hi"' : ''}>${dots}<span>${esc(x.title)}</span>${badge(x)}</li>`).join('') + '</ul>' : ''; };
+  const cls = (a, base) => `${base}${a.id === HI ? ' hi' : ''}`;
+  const asks = top.filter(a => kindOf(a) === 'ask'), busy = top.filter(a => kindOf(a) === 'busy'), done = top.filter(a => kindOf(a) === 'done');
+  let html = '';
+  if (!top.length) html = `<p class="lead"%D%>No open sessions at this station.</p>`;
+  if (asks.length) html += `<div class="grp"%D%>Waiting · ${asks.length}</div>` + asks.map(a => { const parts = askParts(a.ask);
+    return `<article class="${cls(a, 'card')}" data-id="${esc(a.id)}"%D%>${head(a)}`
+      + (parts ? `<ul class="q">${parts.map(x => `<li>${esc(upFirst(x))}</li>`).join('')}</ul>` : `<p class="q">${esc(upFirst(a.ask))}</p>`)
+      + kids(a) + `</article>`; }).join('');
+  if (busy.length) html += `<div class="grp"%D%>Working · ${busy.length}</div>` + busy.map(a =>
+    `<article class="${cls(a, 'card')}" data-id="${esc(a.id)}"%D%>${head(a, dots)}`
+    + `<p class="now"><b>Now:</b> ${a.summary ? esc(upFirst(a.summary)) : 'working, no update yet'}</p>` + kids(a) + `</article>`).join('');
+  if (done.length) html += `<div class="grp"%D%>Finished, read when you can · ${done.length}</div><div class="rows">` + done.map(a =>
+    `<div class="${cls(a, 'row')}" data-id="${esc(a.id)}"%D%><span class="ttl">${esc(a.title || 'Untitled session')}</span><span class="last" title="${esc(a.summary || '')}">${esc(upFirst(a.summary || ''))}</span><span class="when">${ago(a.lastActive)}</span>${badge(a)}</div>`).join('') + `</div>`;
+  if (list._h !== html){
+    const fresh = list._st !== state0.station; let k = 0;
+    list._h = html; list._st = state0.station;
+    list.innerHTML = fresh ? html.replace(/%D%/g, () => ` style="animation-delay:${(.9 + .4*k++).toFixed(2)}s"`) : html.replace(/%D%/g, '');
+    list.querySelectorAll(':scope > .rows').forEach(el => { el.style.animationDelay = el.firstElementChild?.style.animationDelay || '0s'; });  // the box comes with its first row
+    if (fresh) requestAnimationFrame(() => { list.style.transition = 'min-height .7s ease'; list.style.minHeight = '0px'; });
+    list.classList.remove('settled'); clearTimeout(list._settle);
+    if (fresh) list._settle = setTimeout(() => list.classList.add('settled'), (.9 + .4*k + .6)*1000); else list.classList.add('settled');
+  }
+}
+list.addEventListener('click', e => { const c = e.target.closest('[data-id]'); if (c) pick(c.dataset.id); });
+const r0 = ui.render;
+ui.render = () => {
+  r0();
+  if (stripDirty || performance.now() - (strip._t || 0) > 1000){ stripDirty = false; strip._t = performance.now(); drawStrip(); drawList(); }
+  // the little train slides along the rail every frame
+  const trn = strip.querySelector('.trn'), n = STATIONS.length;
+  if (trn){ const u = asTrain.s/SP; let pct;
+    if (n < 2) pct = 50; else if (u <= n - 1) pct = 6 + 88*u/(n - 1); else { const t = u - (n - 1); pct = t < .5 ? 94 + t*36 : -12 + (t - .5)*36; }
+    if (trn._p !== pct){ trn._p = pct; trn.style.left = pct + '%'; trn.style.visibility = pct < 2 || pct > 98 ? 'hidden' : ''; } }
+  h1.textContent = `Fig. 01 — ${state0.station || 'Agent Line'} platform`;
+  // the server only sends when something changes, so a quiet stream is still live while its connection is open
+  const status = LIVE.mode === 'demo' ? 'demo data' : LIVE.mode === 'live' && LIVE.es && LIVE.es.readyState !== 1 ? 'reconnecting' : LIVE.mode;
+  const html = Object.entries(TOOLN).map(([k, n]) => `<i style="background:${TOOLM[k].l}"></i>${n.toLowerCase()}`).join('') + `<i style="background:${status === 'live' ? '#43c25c' : status === 'demo data' ? '#f4b829' : '#e2483d'}"></i>${status}`;
+  if (key._h !== html){ key._h = html; key.innerHTML = html; }
+};
+
+let paused = false;
+// the engine caps a frame at 0.05 s; the trains and people run on real time instead (capped at 0.25 s), so a slow
+// or throttled page still keeps pace
+let lastTick = 0;
+const tick = () => { if (document.hidden){ paused = true; lastTick = 0; return false; }
+  const now = performance.now(), dt = lastTick ? Math.min(.25, (now - lastTick)/1000) : 0; lastTick = now;
+  tickTrain(dt); tickPeople(dt); return true; };
+document.addEventListener('visibilitychange', () => { if (!document.hidden && paused){ paused = false; ui.animate(tick); } });
+ui.animate(tick);
+
+/* ---------- feed: the local server's stream, or made-up agents for a demo ---------- */
+if (DEMO) startDemo(); else connect();
+function connect(){
+  fetch('/api/state').then(r => r.json()).then(s => { LIVE.mode = 'live'; applyState(s); }).catch(() => { LIVE.mode = 'offline'; });
+  const es = LIVE.es = new EventSource('/api/stream');
+  es.onmessage = e => { LIVE.mode = 'live'; applyState(JSON.parse(e.data)); };
+  es.onerror = () => { LIVE.mode = 'reconnecting'; };
+  setInterval(() => { if (LIVE.mode === 'live' && Date.now() - LIVE.at > 1000) ui.render(); }, 5000);
+}
+function startDemo(){
+  const projects = ['Atlas', 'Beacon', 'Cedar', 'Delta', 'Ember', 'Fjord'];
+  const titles = ['Fix sync conflict on profile', 'Write onboarding copy', 'Refactor map renderer', 'Review planning.md', 'Add QR sharing', 'Ingest Kosa chat', 'Guardian review', 'Tune train easing', 'Draft thesis outline', 'Migrate CloudKit schema'];
+  const tools = ['claude', 'claude', 'codex', 'cursor'];
+  const nows = ['Tests pass; writing the handoff', 'Reading the renderer before touching it', 'Two of three screens done', 'Waiting on the build', 'Drafting the copy, second pass'];
+  const asks = ['Approve the migration plan before I run it', 'Which of the two layouts do you want?', 'OK to push to main? Tests pass. Then tell me whether to open the PR', null];
+  const dones = ['Merged into main; nothing pushed', 'Deck deployed as a private artifact', 'Handoff written and committed'];
+  let n = 0; const agents = [];
+  const add = (parent) => { const p = parent ? parent.project : projects[(Math.random()*projects.length)|0], busy = Math.random() < .55 || parent, ask = !busy && Math.random() < .6 ? asks[n % asks.length] : null;
+    agents.push({ id: 'demo' + (++n), tool: parent ? parent.tool : tools[(Math.random()*tools.length)|0], title: parent ? titles[n % titles.length] : titles[n % titles.length], project: p, cwd: '~/' + p,
+      status: busy ? 'working' : 'idle', parentId: parent ? parent.id : null, startedAt: Date.now() - n*1000, lastActive: Date.now() - (busy ? 0 : n*7e5),
+      summary: busy ? nows[n % nows.length] : ask ? 'Plan written; see the lane' : dones[n % dones.length], ...(ask && { ask }) }); };
+  for (let i = 0; i < 11; i++) add();
+  agents[0].status = 'working'; agents[0].summary = nows[0]; delete agents[0].ask;
+  add(agents[0]); add(agents[0]); add(agents[2]);
+  const push = () => applyState({ agents: agents.slice(), stations: projects.map(p => ({ project: p, lastActive: Date.now() })) });
+  push();
+  setInterval(() => {
+    const r = Math.random(), a = agents.filter(x => !x.parentId)[(Math.random()*agents.length)|0];
+    if (r < .45 && a){ const busy = a.status !== 'working'; a.status = busy ? 'working' : 'idle'; a.summary = busy ? nows[(Math.random()*nows.length)|0] : dones[(Math.random()*dones.length)|0]; delete a.ask; if (!busy && Math.random() < .5) a.ask = asks[(Math.random()*3)|0]; }
+    else if (r < .65) add();
+    else if (r < .78 && a) add(a);
+    else if (agents.length > 6){ const i = (Math.random()*agents.length)|0; agents.splice(i, 1); }
+    for (let i = agents.length - 1; i >= 0; i--) if (agents[i].parentId && !agents.some(x => x.id === agents[i].parentId)) agents.splice(i, 1);
+    push();
+  }, 3500);
+}
+</script>
+</body></html>
