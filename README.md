@@ -1,13 +1,12 @@
 # AgentStation
 
-You have agents running in five projects, and one of them has been asking you a question for twenty minutes.
-Which one? Take the train.
+You used to be the commuter. Train in, escalator up, a day of work at your desk.
 
-Every project is a station. Every agent session is a commuter on its platform, wearing a little tag: `…` still
-working, `?` waiting on you, `✓` done and nobody has read it yet. A BART train runs the loop and stops at each
-station long enough to read the tags. Then the commuters go upstairs to work, by lift or escalator, and the train
-moves on.
-Leave the tab open and it tours your whole day for you.
+Now your agents commute. Tens of them, then hundreds, spread across every project you have going. AgentStation
+gives them a subway: each project is a station, each agent is a commuter on its platform, and a train loops the line
+so you can watch them all.
+
+It answers one question at a glance: **who's waiting on me?** Look for the blue `?`.
 
 ![The PKS platform: a BART train at the station, the escalator up to work, and the line of projects below](docs/screenshot.webp)
 
