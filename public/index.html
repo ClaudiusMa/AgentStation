@@ -8,7 +8,8 @@
    The figure is always one platform (x = depth 100, y = length 210, z = 60): track at the back (low x), platform at
    the front, the train pulls in. Above it, a straight line diagram of every station, like a subway map: click a
    station to go there. The train runs back and forth along that line (asTrain.s, line units, SP between stations).
-   Every open agent stands on its platform: an idle one is waiting on the user's feedback, so it still counts as working. */
+   Every open agent stands on its platform: an idle one is waiting on the user's feedback, so it still counts as working.
+   The agents are commuters: off the train, a moment on the platform, then up the lift or the escalator to work. */
 const W = 100, D = 210, H = 60;
 // the platform, after the reference: a thin base board (top z = BZ), a deep platform slab (top z = PT) from x = PX0
 // to the front, the track sunk in a trench behind it, a back wall, and screen doors along the platform edge
@@ -89,7 +90,7 @@ function applyState(state){
     if (p.state !== 'platform') toPlatform(p);
   }
   for (const [id, p] of PEOPLE) if (!seen.has(id) && p.state !== 'leaving'){
-    p.state = 'leaving'; p.fade = -1;
+    p.state = 'leaving'; if (!p.ex) p.fade = -1;               // one already on its way up just finishes going up
   }
 }
 // an agent opens: it fades in at its spot on the platform
@@ -150,7 +151,7 @@ function tickTrain(dt){
   if (T.mode === 'dwell'){
     T.t += dt; T.dwell -= dt;
     // the doors stay open while people are still getting off or on (up to 40 s, so nothing can hold the train for good)
-    if (T.at === spareAt && stopBusy(dt) && T.t < 40) T.dwell = Math.max(T.dwell, .7);
+    if (T.at === spareAt && stopBusy(dt) && T.t < 40) T.dwell = Math.max(T.dwell, 2.6);
     T.open = clamp(Math.min(T.t / .6, T.dwell / .6), 0, 1);
     if (T.dwell <= 0){ T.mode = 'run'; T.from = T.at; T.at = null; T.open = 0; }
     syncView();
@@ -164,13 +165,13 @@ function tickTrain(dt){
   if (dist - T.v*dt <= .05){
     T.s = stop.s; T.v = 0; T.dir = 1; T.mode = 'dwell'; T.at = stop.project; T.from = null; T.t = 0; T.dwell = DWELL; T.target = null;
     // every stop here runs the same way: the spares on board get off, wait, and get back on
-    if (T.at === spareAt){ visit = { out: false, calm: 0 }; for (const q of SPARES) if (q.state === 'train') q.state = 'riding'; }
+    if (T.at === spareAt){ visit = { out: false, calm: 0, exit: exitFor(T.at) }; for (const q of SPARES) if (q.state === 'train') q.state = 'riding'; }
   }
   syncView();
 }
 
 /* ---------- walking + slots (platform units) ---------- */
-const SLOT_Y = [66, 146, 40, 172, 84, 128, 20, 192];
+const SLOT_Y = [96, 150, 76, 130, 112, 168, 86, 182];   // clear of the escalator's foot and queue (y < 70)
 const GAPS = DOORS.map(d => STOP_Y + d + DOOR_W/2);   // where the train's doors (and the screen-door gaps) are
 function slotsFor(name){
   const out = new Map(), here = [...PEOPLE.values()].filter(p => p.st === name);
@@ -198,8 +199,9 @@ function syncSpares(){
   const name = state0.station; if (!name) return;
   const want = Math.max(0, POOL - [...PEOPLE.values()].filter(p => p.st === name && p.state === 'platform').length);
   if (spareAt !== name){
-    spareAt = name; SPARES = []; visit = { out: false, calm: 0 };
-    for (const p of PEOPLE.values()) p.arrive = p.st === name && p.state === 'platform';
+    spareAt = name; SPARES = []; visit = { out: false, calm: 0, exit: exitFor(name) };
+    for (const p of PEOPLE.values()){ p.arrive = p.st === name && p.state === 'platform'; if (p.arrive){ p.ex = null; p.z = PT; } }
+    Object.assign(lift, { state: 'idle', z: 0, open: 0, t: 0 }); escLast = -1e9;
     if (trainAt() !== name && !asTrain.target) asTrain.target = name;     // the train brings everyone in
     else visit.out = false;
   }
@@ -220,7 +222,9 @@ function stopBusy(dt){
   const settling = arriving().length || SPARES.some(q => q.state === 'riding' || q.state === 'alighting' || (q.state === 'waiting' && q.moving));
   if (settling){ visit.calm = 0; return true; }
   if (SPARES.some(q => q.state === 'waiting')){ visit.calm += dt; if (visit.calm > .8) for (const q of SPARES) if (q.state === 'waiting') q.state = 'boarding'; return true; }
-  return SPARES.some(q => q.state === 'boarding');
+  if (SPARES.some(q => q.state === 'boarding')) return true;
+  // the commuters: the doors stay open until everyone who got off here has gone up to work
+  return [...PEOPLE.values()].some(p => p.st === spareAt && p.state === 'platform' && !p.arrive && (!p.ex || p.ex.phase !== 'gone'));
 }
 // step through a door: appear just inside it, walk out through the gap, then on to where you're going
 function stepOff(p, i){ const g = GAPS[i % GAPS.length]; p.x = 30; p.y = g; p.via = [50, g]; p.alpha = 1; p.fade = 1; }
@@ -231,6 +235,65 @@ function walk(p, dt, speed){
   if (d <= step){ p.x = tx; p.y = ty; p.via = null; } else { p.x += dx/d*step; p.y += dy/d*step; }
 }
 let exitN = 0;
+
+/* ---------- the way out: a lift for a few, an escalator for a crowd ----------
+   The agents are commuters. Off the train, a moment on the platform (long enough to read their tags), then up to the
+   office. A station has one exit, running off the end of the platform the way a real one leads to the concourse: a
+   glass lift tower on a landing past the left end for three or fewer agents, an escalator up past the right end for more. A big sign hangs over it with the project's
+   name. They are gone before the train leaves; the next time round they ride in again. A passenger on its way out
+   keeps state 'platform' (its card, number and counters stay) and carries p.ex = { via: 'lift' | 'esc', phase, t }. */
+const LIFT = { x0: 60, x1: 84, y0: 216, y1: 240, rise: 40, hood: 14, door: [222, 234], land: [56, 210, 94, 242] };
+const ESC = { x0: 64, x1: 80, yf: 60, yt: -22, rise: 32, bal: 8, truss: 8 };    // foot on the platform, rising up and away past its right end
+const LIFT_FEW = 3, LINGER = 2.4, ESC_T = 4.2, ESC_GAP = .8;
+const LIFT_C = [(LIFT.x0 + LIFT.x1)/2, (LIFT.y0 + LIFT.y1)/2], ESC_X = (ESC.x0 + ESC.x1)/2;
+const LIFT_SPOTS = [[0, 0], [-4.5, 2.5], [4.5, -2.5], [-4.5, -3.5], [4.5, 3.5]];   // where riders stand in the cab
+const lift = { state: 'idle', z: 0, open: 0, t: 0 };            // idle | opening | open | closing | up | top | down
+let escLast = -1e9, exitSeq = 0;
+const exiting = () => [...PEOPLE.values()].filter(p => p.ex && p.st === spareAt);
+const liftBound = () => exiting().filter(p => p.ex.via === 'lift');
+// which exit a station has: decided by how many agents it has when the train comes, and kept for the visit
+const exitFor = name => [...PEOPLE.values()].filter(p => p.st === name && p.state === 'platform').length <= LIFT_FEW ? 'lift' : 'esc';
+const liftEase = u => u < .5 ? 2*u*u : 1 - 2*(1 - u)*(1 - u);
+function tickLift(dt){
+  const L = lift, bound = liftBound(); L.t += dt;
+  if (L.state === 'opening'){ L.open = Math.min(1, L.open + dt/.5); if (L.open >= 1){ L.state = 'open'; L.t = 0; } }
+  else if (L.state === 'open'){
+    const aboard = bound.some(p => p.ex.phase === 'aboard'), coming = bound.some(p => p.ex.phase === 'to' || p.ex.phase === 'board');
+    if ((aboard && (!coming || L.t > 8)) || (!aboard && !coming && L.t > 3)) L.state = 'closing';
+  }
+  else if (L.state === 'closing'){ L.open = Math.max(0, L.open - dt/.5); if (L.open <= 0){ L.state = bound.some(p => p.ex.phase === 'aboard') ? 'up' : 'idle'; L.t = 0; } }
+  else if (L.state === 'up'){ const u = Math.min(1, L.t/3.2); L.z = LIFT.rise*liftEase(u); if (u >= 1){ L.state = 'top'; L.t = 0; } }
+  else if (L.state === 'top'){ if (L.t > 1.2){ L.state = 'down'; L.t = 0; } }
+  else if (L.state === 'down'){ const u = Math.min(1, L.t/2.6); L.z = LIFT.rise*(1 - liftEase(u)); if (u >= 1){ L.z = 0; L.state = 'idle'; } }
+}
+// one passenger's way out. linger: stand at the spot a moment. to: walk to the lift door or the foot of the escalator
+// (queueing down the platform). ride / in: up the escalator, then through the doorway at the top. board / aboard:
+// into the cab, then up with it. gone: upstairs, drawn no more.
+function tickExit(p, dt){
+  const e = p.ex;
+  if (e.phase === 'linger'){ if (!p.moving) e.t += dt; if (e.t < LINGER) return;
+    e.phase = 'to'; e.at = ++exitSeq; p.via = null;
+    if (e.via === 'lift'){ const n = liftBound().filter(q => q !== p && q.ex.phase !== 'linger' && q.ex.phase !== 'gone').length; e.spot = LIFT_SPOTS[n % LIFT_SPOTS.length]; }
+    return;
+  }
+  if (e.phase === 'to'){
+    if (e.via === 'esc'){
+      const q = exiting().filter(x => x.ex.via === 'esc' && x.ex.phase === 'to' && x.ex.at < e.at).length;
+      p.tx = ESC_X - 2; p.ty = ESC.yf + 2 + 9*q; walk(p, dt, 34);
+      if (!q && !p.moving && performance.now() - escLast > ESC_GAP*1000){ escLast = performance.now(); e.phase = 'ride'; e.t = 0; }
+    } else {
+      p.tx = LIFT.x1 + 6; p.ty = LIFT_C[1] + e.spot[1]*1.3; walk(p, dt, 34);
+      if (lift.state === 'idle' && Math.hypot(p.x - LIFT.x1, p.y - LIFT_C[1]) < 36){ lift.state = 'opening'; lift.t = 0; }
+      if (!p.moving && lift.state === 'open'){ e.phase = 'board'; p.tx = LIFT_C[0] + e.spot[0]; p.ty = LIFT_C[1] + e.spot[1]; }
+    }
+  }
+  else if (e.phase === 'ride'){ e.t += dt; const u = Math.min(1, e.t/ESC_T);
+    p.x = ESC_X; p.y = ESC.yf + (ESC.yt - ESC.yf)*u; p.z = PT + ESC.rise*u; p.moving = false;
+    if (u >= 1){ e.phase = 'in'; p.tx = ESC_X; p.ty = ESC.yt - 10; } }
+  else if (e.phase === 'in'){ p.z = PT + ESC.rise; walk(p, dt, 30); if (p.y <= ESC.yt - 5) e.phase = 'gone'; }
+  else if (e.phase === 'board'){ if (lift.state !== 'open'){ e.phase = 'to'; return; } walk(p, dt, 30); if (!p.moving) e.phase = 'aboard'; }
+  else if (e.phase === 'aboard'){ p.z = PT + lift.z + 1; if (lift.state === 'top') e.phase = 'gone'; }
+}
 function tickSpares(dt){
   syncSpares();
   for (const q of SPARES){
@@ -248,15 +311,20 @@ function tickSpares(dt){
   }
 }
 function tickPeople(dt){
-  tickSpares(dt);
+  tickSpares(dt); tickLift(dt);
   const slots = new Map(); for (const x of STATIONS) for (const [k, v] of slotsFor(x.project)) slots.set(k, v);
   for (const [id, p] of PEOPLE){
     if (p.arrive){                                       // still aboard: steps off once the doors are open
       if (p.state === 'leaving'){ PEOPLE.delete(id); AGENTS.delete(id); continue; }
       if (p.exitIn == null || (p.exitIn -= dt) > 0) continue;
-      p.arrive = false; p.exitIn = null; stepOff(p, exitN++); p.placeOnNextLayout = false;
+      p.arrive = false; p.exitIn = null; stepOff(p, exitN++); p.placeOnNextLayout = false; p.ex = null; p.z = PT;
     }
     p.alpha = clamp(p.alpha + p.fade*dt/.8, 0, 1);
+    if (p.ex){                                           // on its way up to the office
+      tickExit(p, dt);
+      if (p.ex.phase === 'gone' && p.state === 'leaving'){ PEOPLE.delete(id); AGENTS.delete(id); }
+      continue;
+    }
     if (p.state === 'leaving'){
       if (asTrain.at === p.st && asTrain.open > .9){
         const g = GAPS.reduce((b, y) => Math.abs(y - p.y) < Math.abs(b - p.y) ? y : b);
@@ -267,6 +335,8 @@ function tickPeople(dt){
     else if (slots.has(id)){ [p.tx, p.ty] = slots.get(id); if (p.placeOnNextLayout){ p.x = p.tx; p.y = p.ty; p.placeOnNextLayout = false; } }
     if (p.tx == null) continue;
     walk(p, dt, 34);
+    // off the train and settled at its spot: a commuter heads for the way out
+    if (p.state === 'platform' && !p.moving && p.alpha >= 1 && p.st === spareAt && visit.out) p.ex = { via: visit.exit || 'esc', phase: 'linger', t: 0 };
   }
 }
 
@@ -372,6 +442,58 @@ function train(ty, open, riders){
 function peekNext(){ const T = asTrain; if (T.target && stationOf(T.target)) return stationOf(T.target);
   for (const dir of [T.dir, -T.dir]){ let best = null, bd = 1e9; for (const x of STATIONS){ const d = (x.s - T.s)*dir; if (d > .5 && d < bd){ bd = d; best = x; } } if (best) return best; }
   return null; }
+// The draw order of a scene's parts. core.js's byDepth hands them to Array.sort with a comparator that is not a total order:
+// two boxes that separate along an axis go by that axis, two that overlap go by the depth of their centres, and a third
+// part can sit on either side of both. Sorting with that is undefined, so the answer changes with the smallest move of
+// anything (a spare walking out of the train made the landing, the posts and the sign trade places). Here a pair of parts
+// is ordered only if one could hide the other, that is, if some line of sight passes through both boxes (the sign, the lift
+// and the landing are each in front of one another by their boxes, round and round, and never meet). That pair gets one
+// fixed direction: the separating axis of its sorting boxes if they have one (a law), else whichever is nearer along the
+// lines of sight that pass through both (so a long part is judged where the other one stands, not by its far-off centre;
+// people against people simply by the depth of their centres). The parts are then drawn as a chain: each time the part
+// that nothing unfinished must precede, back-most first (ties go to the part pushed first). If every part left is waiting
+// on another (parts that overlap in a ring), the ring is broken where it costs least: at a part that waits on no law, then
+// on the fewest. So the order changes only when two parts truly cross, and it cannot wobble in between.
+// A part's `reach` (default: its box) is the volume it can be drawn in, when that is wider than its sorting box: the
+// train past its doors, a person's name tag and flag.
+const SIGHT_SLACK = .3;                                                     // world units: the ink round an edge
+function sightBetween(a, b){      // the span of t with a - b = t·CAM_V for some point of each box (t > 0: a is nearer), or null
+  let lo = -Infinity, hi = Infinity;
+  for (let k = 0; k < 3; k++){
+    const d0 = a[0][k] - b[1][k], d1 = a[1][k] - b[0][k], v = CAM_V[k];
+    if (Math.abs(v) < 1e-9){ if (d0 > SIGHT_SLACK || d1 < -SIGHT_SLACK) return null; continue; }
+    lo = Math.max(lo, Math.min(d0 / v, d1 / v)); hi = Math.min(hi, Math.max(d0 / v, d1 / v)); }
+  return lo <= hi + SIGHT_SLACK ? [lo, hi] : null;
+}
+function orderParts(list){
+  const ps = list.filter(Boolean), n = ps.length, key = ps.map(p => depthOf(boxMid(p.box)));
+  const goes = ps.map(() => []), waiting = new Array(n).fill(0), waitLaw = new Array(n).fill(0), done = new Array(n).fill(false);
+  for (let i = 0; i < n; i++) for (let j = i + 1; j < n; j++){
+    const people = !!ps[i].kind && ps[i].kind === ps[j].kind;                // two people: their bodies, not their tags
+    if (!sightBetween(people ? ps[i].box : ps[i].reach || ps[i].box, people ? ps[j].box : ps[j].reach || ps[j].box)) continue;
+    let r = people ? 0 : sepOrder(ps[i], ps[j]);                           // -1: i goes first, 1: j goes first
+    const law = r !== 0, t = law || people ? null : sightBetween(ps[i].box, ps[j].box);
+    if (!law) r = Math.sign(t ? t[0] + t[1] : key[i] - key[j]);
+    const first = r > 0 ? j : i, then = first === i ? j : i;
+    goes[first].push({ then, law }); waiting[then]++; if (law) waitLaw[then]++; }
+  const onRing = i => { const seen = new Set(), stack = goes[i].map(e => e.then);
+    while (stack.length){ const x = stack.pop(); if (done[x] || seen.has(x)) continue; if (x === i) return true; seen.add(x); for (const e of goes[x]) stack.push(e.then); }
+    return false; };
+  let out = '';
+  for (let k = 0; k < n; k++){
+    let pick = -1;
+    for (let i = 0; i < n; i++) if (!done[i] && !waiting[i] && (pick < 0 || key[i] < key[pick])) pick = i;
+    if (pick < 0) for (let i = 0; i < n; i++)                               // a ring: choose among the parts on one
+      if (!done[i] && onRing(i) && (pick < 0 || waitLaw[i] < waitLaw[pick] || (waitLaw[i] === waitLaw[pick] && (waiting[i] < waiting[pick] || (waiting[i] === waiting[pick] && key[i] < key[pick]))))) pick = i;
+    done[pick] = true; out += ps[pick].svg;
+    for (const e of goes[pick]){ waiting[e.then]--; if (e.law) waitLaw[e.then]--; }
+  }
+  return out;
+}
+// a person as a part: the sorting box is the footprint of the body and its height, starting just above the floor so that
+// it always draws over what lies on the floor (the platform, the lime ring); the reach adds the name tag (to the right
+// on the screen, over the head) and a guide's flag
+const personPart = (x, y, svg) => ({ box: [[x - 3.8, y - 3.8, PT + .4], [x + 3.8, y + 3.8, PT + 24]], reach: [[x - 3.8, y - 16, PT + .4], [x + 12, y + 3.8, PT + 46]], kind: 'person', svg });
 function platformScene(st){
   const name = st.station || 'No agents yet', T = asTrain, me = stationOf(name);
   let s = board(-6, -6, W + 6, D + 6, BZ, 8, BOARD);
@@ -393,8 +515,9 @@ function platformScene(st){
   let plat = box(PX0, 0, BZ, W, D, PT, CONC, tone, 1.6) + shape(on(PZ(PT + .05), rectUV(PX0 + 1, 1, PX0 + 4, D - 1)), CONC.d, .5)
     + shape(on(PZ(PT + .05), rectUV(PX0 + 4, 1, PX0 + 9, D - 1)), '#f2c230', .7);
   for (let y = 3.5; y < D - 2; y += 3.4) for (const x of [PX0 + 5.3, PX0 + 7.7]){ const [cx, cy] = P(x, y, PT + .1); plat += `<circle cx="${f(cx)}" cy="${f(cy)}" r="${f(.55*CAM_K)}" fill="#c9960f"/>`; }
-  const here = [...PEOPLE.values()].filter(p => p.st === name && !p.arrive);
-  for (const p of [...here, ...spares]) plat += `<g opacity="${f(.9*p.alpha)}">${personShadow(p.x, p.y, PT)}</g>`;
+  const here = [...PEOPLE.values()].filter(p => p.st === name && !p.arrive && !(p.ex && p.ex.phase === 'gone'));
+  const onFloor = here.filter(p => !p.ex || p.ex.phase === 'linger' || p.ex.phase === 'to');   // the rest are on the lift or the escalator
+  for (const p of [...onFloor, ...spares]) plat += `<g opacity="${f(.9*p.alpha)}">${personShadow(p.x, p.y, PT)}</g>`;
   // the wall across the tracks: brown tile, the station's name in big white Helvetica, the line's colour under it
   let wall = box(0, 0, BZ, 5, D, WALL_H, WALL, tone, 1.2);
   if (vis([1, 0, 0])){ const Xw = 5.05;
@@ -406,42 +529,103 @@ function platformScene(st){
   const parts = [
     { box: [[0, 0, BZ], [5, D, WALL_H]], svg: wall },
     { box: [[5, 0, BZ], [PX0, D, BZ + 5.2]], svg: track },
-    { box: [[PX0, 0, BZ], [W, D, PT]], svg: plat },
+    // the platform's sorting box starts where the train's ends (x 26) and above the ballast, so a person is over it from the
+    // moment of stepping out of a door, and the track and the train always come before it
+    { box: [[26, 0, BZ + 5.2], [W, D, PT]], reach: [[PX0, 0, BZ], [W, D, PT]], svg: plat },
   ];
   if (ty != null){
     // the train is cut off where the platform ends, as if it came out of a tunnel
     const cut = [];
     for (const x of [5, PX0]) for (const y of [0, D]) for (const z of [BZ, H + 2]) cut.push(P(x, y, z));
     const id = 'trainclip' + (++_clipN);
-    // the train's sorting box starts at the top of the track (third rail included), so it always draws over the track
-    parts.push({ box: [[9, ty - NOSE_L, BZ + 5.2], [37, ty + CAR_LEN + NOSE_L, 60]], svg: `<clipPath id="${id}"><path d="${sp(hull(cut))}"/></clipPath><g clip-path="url(#${id})">${train(ty, open, riders)}</g>` }); }
-  // the station sign: a next-train board over the name board, on two posts, facing the front
-  const sy0 = 84, sy1 = 126, i = STATIONS.indexOf(me), ti = STATIONS.findIndex(x => Math.abs(x.s - T.s) < SP/2);
-  const ahead = me ? mod((me.s - T.s)*T.dir, loopLen()) : 0, away = Math.round(ahead/SP);
-  const next = !me ? '' : T.at === name ? 'AT PLATFORM' : ahead <= SP ? 'ARRIVING' : `${away} STOPS AWAY`;
-  let sign = box(71.2, sy0 + 4, PT, 72.6, sy0 + 5.4, PT + 32, DARK, tone, .7) + box(71.2, sy1 - 5.4, PT, 72.6, sy1 - 4, PT + 32, DARK, tone, .7)
-    + box(70.4, sy0, PT + 15, 73.4, sy1, PT + 26, SIGN, tone, 1.2) + box(70.6, sy0 + 3, PT + 27, 73.2, sy1 - 3, PT + 35, SIGN, tone, 1);
-  if (vis([1, 0, 0])){ const Xf = 73.55, Xl = 73.35, nm = name.slice(0, 16), cy = (sy0 + sy1)/2;
-    sign += fill(pd([[Xf, sy0 + 1, PT + 15.6], [Xf, sy1 - 1, PT + 15.6], [Xf, sy1 - 1, PT + 17.2], [Xf, sy0 + 1, PT + 17.2]]), 'var(--accent)')
-      + txH(Xf, cy, PT + 19.6, esc(nm), Math.min(6.4, 36/(nm.length*.58)), '#f6f3ee', 700)
-      + tx(Xl, cy, PT + 31.8, esc(DEST) + ' TRAIN', 2.4, LED_TX, 800) + tx(Xl, cy, PT + 28.4, esc(next), 2.6, LED_TX, 800); }
-  parts.push({ box: [[70.4, sy0, PT], [73.4, sy1, PT + 35]], svg: sign });
+    // the train's sorting box starts at the top of the track (third rail included), so it always draws over the track, and
+    // stops short of its doors (x 26, where a person steps off at 30 at the nearest), so whoever is out of the train draws over it
+    parts.push({ box: [[9, ty - NOSE_L, BZ + 5.2], [26, ty + CAR_LEN + NOSE_L, 60]], reach: [[9, ty - NOSE_L, BZ + 5.2], [37, ty + CAR_LEN + NOSE_L, 60]], svg: `<clipPath id="${id}"><path d="${sp(hull(cut))}"/></clipPath><g clip-path="url(#${id})">${train(ty, open, riders)}</g>` }); }
   const ag = id => AGENTS.get(id) || {}, nums = numbering();
-  for (const p of here){
+  // a passenger, wherever it is: on the platform, on a step of the escalator or on the lift's floor
+  const figure = p => {
     const a = ag(p.id), leads = here.some(q => ag(q.id).parentId === p.id && q.state === 'platform');
-    const bob = p.moving ? Math.abs(Math.sin(p.walk*9))*1.2 : 0;
+    const bob = p.moving ? Math.abs(Math.sin(p.walk*9))*1.2 : 0, z = p.ex && p.z != null && /^(ride|in|aboard)$/.test(p.ex.phase) ? p.z : PT;
     const tag = p.state === 'platform' && nums.has(p.id) ? { n: nums.get(p.id), kind: kindOf(a) } : null;
+    const who = (nums.get(p.id) ? nums.get(p.id) + '  ' : '') + (a.title || 'Untitled session') + (a.ask ? ' — asks: ' + a.ask : a.summary ? ' — ' + a.summary : '');
+    return act('ag', `<title>${esc(who)}</title>` + person(p.x, p.y, z, a.tool, { bob, flag: leads, tag, alpha: p.alpha }), `data-id="${esc(p.id)}"`);
+  };
+  for (const p of onFloor){
     // the picked passenger (or card) stands on a lime ring
     if (p.id === HI){ const ring = pd(on(PZ(PT + .1), ellUV(p.x, p.y, 7.5, 7.5, 18)));
       parts.push({ box: [[p.x - 7.5, p.y - 7.5, PT], [p.x + 7.5, p.y + 7.5, PT + .3]], svg: `<g opacity="${f(.85*p.alpha)}">${fill(ring, 'var(--accent)')}${ink(ring, 1)}</g>` }); }
-    const who = (nums.get(p.id) ? nums.get(p.id) + '  ' : '') + (a.title || 'Untitled session') + (a.ask ? ' — asks: ' + a.ask : a.summary ? ' — ' + a.summary : '');
-    parts.push({ box: [[p.x - 3.8, p.y - 3.8, PT], [p.x + 3.8, p.y + 3.8, PT + 24]],
-      svg: act('ag', `<title>${esc(who)}</title>` + person(p.x, p.y, PT, a.tool, { bob, flag: leads, tag, alpha: p.alpha }), `data-id="${esc(p.id)}"`) });
+    parts.push(personPart(p.x, p.y, figure(p)));
   }
+  exitsScene(name, parts, figure, here);
   for (const q of spares){ const bob = q.moving ? Math.abs(Math.sin(q.walk*9))*1.2 : 0;
-    parts.push({ box: [[q.x - 3.8, q.y - 3.8, PT], [q.x + 3.8, q.y + 3.8, PT + 24]], svg: person(q.x, q.y, PT, 'spare', { bob, alpha: q.alpha }) }); }
-  s += byDepth(parts);
+    parts.push(personPart(q.x, q.y, person(q.x, q.y, PT, 'spare', { bob, alpha: q.alpha }))); }
+  s += orderParts(parts);
   return s;
+}
+
+// the way out, past the left end of the platform: the lift tower or the escalator, whichever this station has, and a
+// big black sign hanging over it with the project's name in white Helvetica over the line's blue band
+function exitsScene(name, parts, figure, here){
+  const via = name === spareAt && visit.exit ? visit.exit : exitFor(name);
+  const nm = '↑ ' + name.toUpperCase().slice(0, 18);
+  // the sign: a board in the air, its face toward us at x, centred on (y, z); it scales with the figure like everything else
+  const floatSign = (x, y, z) => { const fs = Math.min(8.5, 66/(nm.length*.6)), w = nm.length*fs*.62 + 10, h = fs*1.9, X = x + .05;
+    return { box: [[x - 1.2, y - w/2, z - h/2], [x, y + w/2, z + h/2]],
+      svg: box(x - 1.2, y - w/2, z - h/2, x, y + w/2, z + h/2, SIGN, tone, 1.3)
+        + fill(pd([[X, y - w/2 + 2, z - h/2 + 1.2], [X, y + w/2 - 2, z - h/2 + 1.2], [X, y + w/2 - 2, z - h/2 + 2.8], [X, y - w/2 + 2, z - h/2 + 2.8]]), 'var(--accent)')
+        + txH(X, y, z - fs*.3 + .8, esc(nm), fs, '#f6f3ee', 700) }; };
+  if (via === 'esc'){
+    // --- the escalator: up from the platform and on past its right end, on a truss over two columns, into a doorway at the top
+    const { x0, x1, yf, yt, rise, bal, truss } = ESC, zt = PT + rise, xi0 = x0 + 1.5, xi1 = x1 - 1.5, X = ESC_X;
+    const zd = y => PT + rise*(yf - y)/(yf - yt);                                           // the deck's height along the way
+    let s = '';
+    for (const y of [-8, yt + 2]) s += box(X - 3, y, 0, X + 3, y + 4, zd(y + 2) - truss + .5, DARK, tone, .8);    // the columns
+    s += shape([[xi0, yf, PT], [xi0, yt, zt], [xi0, yt, zt + bal], [xi0, yf, PT + bal]], CONC.m, .8)             // far balustrade, inside
+      + shape([[x0, yf, PT + bal], [xi0, yf, PT + bal], [xi0, yt, zt + bal], [x0, yt, zt + bal]], DARK.m, .7)
+      + shape([[xi0, yf, PT], [xi1, yf, PT], [xi1, yt, zt], [xi0, yt, zt]], CARM.d, .9);                          // the steps
+    for (let y = yf - 2.8; y > yt + 1; y -= 2.8) s += `<path d="${pd([[xi0, y, zd(y)], [xi1, y, zd(y)]], false)}" stroke="${INK}" stroke-width=".5" opacity=".45"/>`;
+    const riders = here.filter(p => p.ex && (p.ex.phase === 'ride' || p.ex.phase === 'in')).sort((a, b) => a.y - b.y);
+    // through the doorway: whatever is past its face is upstairs and not drawn
+    for (const p of riders){ const fig = figure(p); s += p.y < yt + 4 ? clipTo([[p.x, yt, -80], [p.x, yt + 300, -80], [p.x, yt + 300, 300], [p.x, yt, 300]], fig) : fig; }
+    // the near side: the balustrade, and under it the truss, solid on the platform then a beam beyond its end
+    s += shape([[x1, yf, PT], [x1, 0, PT], [x1, 0, zd(0) - truss], [x1, yt, zt - truss], [x1, yt, zt + bal], [x1, yf, PT + bal]], CONC.l, 1)
+      + shape([[xi1, yf, PT + bal], [x1, yf, PT + bal], [x1, yt, zt + bal], [xi1, yt, zt + bal]], DARK.m, .7)
+      + `<path d="${pd([[x1, 0, PT], [x1, yt, zt]], false)}" stroke="${INK}" stroke-width=".7" opacity=".5"/>`;
+    // the sorting box starts at the platform's surface, so the foot and the steps over the platform draw over it (the columns past
+    // its end stand clear of it)
+    parts.push({ box: [[x0, yt, PT], [x1, yf, zt + bal]], svg: s });
+    // the doorway at the top, a black box on the landing; the sign hangs over it
+    const px0 = x0 - 2, px1 = x1 + 2, pz1 = zt + 24;
+    parts.push({ box: [[px0, yt - 10, zt - truss], [px1, yt, pz1]], svg: box(px0, yt - 10, zt - truss, px1, yt, pz1, SIGN, tone, 1.1) });
+    parts.push(floatSign(x1 + 1, 36, 74));                        // hangs over the lower half, clear of the riders' heads
+  } else {
+    // --- the lift: the platform runs on a little past its end, and a glass tower stands on that landing, its door toward
+    // the front; the cab rises into the hood and the sign hangs over it
+    const { x0, x1, y0, y1, rise, hood, door: [d0, d1], land: [lx0, ly0, lx1, ly1] } = LIFT, zt = PT + rise, [cx] = LIFT_C, L = lift, lz = PT + L.z;
+    parts.push({ box: [[lx0, ly0, 0], [lx1, ly1, PT]], svg: box(lx0, ly0, 0, lx1, ly1, PT, CONC, tone, 1.4) });
+    const pane = pts => `<g opacity=".3">${fill(pd(pts), GLASS)}</g>` + ink(pd(pts), .9);
+    for (const [x, y] of [[x0, y0], [x0, y1 - 1], [x1 - 1, y0], [x1 - 1, y1 - 1]]) parts.push({ box: [[x, y, PT], [x + 1, y + 1, zt]], svg: box(x, y, PT, x + 1, y + 1, zt, DARK, tone, .7) });
+    // the cab: a floor, the riders on it, a glass rail; cut off where it rises into the hood
+    const riders = here.filter(p => p.ex && (p.ex.phase === 'board' || p.ex.phase === 'aboard')).sort((a, b) => (a.x + a.y) - (b.x + b.y));
+    let cab = box(x0 + 1.5, y0 + 1.5, lz, x1 - 1.5, y1 - 1.5, lz + 1, CARM, tone, .8);
+    for (const p of riders) cab += `<g opacity="${f(.9*p.alpha)}">${personShadow(p.x, p.y, lz + 1)}</g>`;
+    for (const p of riders) cab += figure(p);
+    cab += `<g opacity=".4">${shape([[x0 + 1.5, y1 - 1.5, lz + 1], [x1 - 1.5, y1 - 1.5, lz + 1], [x1 - 1.5, y1 - 1.5, lz + 8], [x0 + 1.5, y1 - 1.5, lz + 8]], GLASS, .8)}</g>`;
+    parts.push({ box: [[x0 + 1.5, y0 + 1.5, Math.min(lz, zt - .02)], [x1 - 1.5, y1 - 1.5, Math.min(lz + 25, zt - .01)]], svg: clipTo([[cx, -60, -80], [cx, 420, -80], [cx, 420, zt], [cx, -60, zt]], cab) });
+    // the glass: the two faces we see; the door slides open in the front face, a lamp over it lights while the cab moves
+    parts.push({ box: [[x0, y1 - .4, PT], [x1, y1, zt]], svg: pane([[x0 + 1, y1, PT], [x1 - 1, y1, PT], [x1 - 1, y1, zt], [x0 + 1, y1, zt]]) });
+    let front = pane([[x1, y0 + 1, PT], [x1, d0, PT], [x1, d0, zt], [x1, y0 + 1, zt]]) + pane([[x1, d1, PT], [x1, y1 - 1, PT], [x1, y1 - 1, zt], [x1, d1, zt]])
+      + pane([[x1, d0, PT + 24], [x1, d1, PT + 24], [x1, d1, zt], [x1, d0, zt]]);
+    const mid = (d0 + d1)/2, sl = L.open*(d1 - d0)/2, Xd = x1 + .25;
+    for (const [a, b] of [[d0, mid - sl], [mid + sl, d1]]) if (b - a > .3){
+      front += shape([[Xd, a, PT], [Xd, b, PT], [Xd, b, PT + 24], [Xd, a, PT + 24]], CARM.m, .9);
+      if (b - a > 2.6) front += `<g opacity=".35">${fill(pd([[Xd, a + 1, PT + 12], [Xd, b - 1, PT + 12], [Xd, b - 1, PT + 21], [Xd, a + 1, PT + 21]]), GLASS)}</g>`; }
+    const lit = L.state === 'up' || L.state === 'down';
+    front += shape([[Xd, mid - 2.5, PT + 25], [Xd, mid + 2.5, PT + 25], [Xd, mid + 2.5, PT + 26.6], [Xd, mid - 2.5, PT + 26.6]], lit ? LED_TX : LED, .5);
+    parts.push({ box: [[x1 - .4, y0, PT], [x1, y1, zt]], svg: front });
+    parts.push({ box: [[x0, y0, zt], [x1, y1, zt + hood]], svg: box(x0, y0, zt, x1, y1, zt + hood, SIGN, tone, 1.1) });
+    parts.push(floatSign(x1 + 1, LIFT_C[1], zt + hood + 14));
+  }
 }
 
 /* ---------- mount ---------- */

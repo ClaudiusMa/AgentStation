@@ -59,6 +59,13 @@ The small number in the tag (1, 2, 3…) is just an id: the oldest open session 
 stand in a line behind their parent, who carries a yellow flag. Hover a passenger to see its title and last update.
 The three counters at the top left (Working / Waiting / Finished) count the sessions on this platform.
 
+**The way out.** The agents are commuters. Once off the train and settled for a moment (long enough to read the
+tags), they head up to work. Each station has one exit, running off the end of the platform the way a real one leads
+to the concourse: a glass lift tower on a landing past the left end when three or fewer agents are here, an escalator
+up past the right end when there are more. A big sign with the project's name hangs in the air over the exit. The
+train waits until the last one has gone up, then the doors close. Their cards and counters stay; when the train comes
+round again, they ride in again.
+
 **The train and the loop.** The line under the figure is every project with an open session (the 12 most recently
 active, if there are more), in alphabetical order. The train stops about twelve seconds at each station, then runs to the next; after the last one it comes
 round to the first. The page always shows the station the train is at, so it tours every project on its own. When
@@ -106,12 +113,14 @@ lib/util.mjs        read-only sqlite, partial file reads, project naming
 public/index.html   the whole page: simulation (train, people), the figure, the line strip, the session list
 public/core.js      the Colorfigures drawing engine (vendored, MIT, April Zhu; do not edit)
 app/build.sh        builds dist/AgentStation.app; app/launcher.sh is what the icon runs; app/icon.svg
+BRIEF.md            the owner's confirmed product decisions: the metaphor, what counts as open, the BART look
+.hai/               the HAI-Harness: how agents work on this repo (start with .hai/Agents/onboarding.md)
 ```
 
 The server collects at most once every 2 s however many tabs are open, and the stream sends a snapshot only when
 something other than the timestamp changed. The page keeps its own simulation: a fixed pool of 9 passengers per
-stop (the station's agents plus grey spares who get back on), a train position on the loop, and a view that follows
-it. Everything on the page is redrawn from that state every frame.
+stop (the station's agents, who go up the lift or the escalator, plus grey spares who get back on), a train position
+on the loop, and a view that follows it. Everything on the page is redrawn from that state every frame.
 
 The state shape: `{ generatedAt, agents[], stations[], sources }`. Agent ids are prefixed by tool (`claude:`,
 `codex:`, `cursor:`); `parentId` is set only when the parent is open too. Optional fields: `model`, `branch`,
@@ -119,12 +128,12 @@ The state shape: `{ generatedAt, agents[], stations[], sources }`. Agent ids are
 
 ## Changing it
 
-Keep to the design as it stands: the page loops through every station on its own, the view follows the train,
-arrivals are staged, and text on the page stays minimal.
+Read `BRIEF.md` first: it holds decisions the owner has confirmed (the loop, the view following the train, the
+staged arrivals, less text), and the latest decision wins over anything older in the code or docs.
 
 - **The page** (`public/index.html`): reload the browser to see a change. The look is a set of materials and small
-  drawing functions at the top; the train's timing is `DWELL` and the speeds in `tickTrain`; the list is
-  `drawList`.
+  drawing functions at the top; the train's timing is `DWELL` and the speeds in `tickTrain`; the exits are `LIFT`, `ESC`,
+  `tickExit` and `exitsScene` (one of the two per station, chosen by `exitFor`); the list is `drawList`.
 - **A collector** (`lib/*.mjs`): restart the server afterwards. `node lib/collect.mjs` shows what it now sees.
 - **The app** (`/Applications/AgentStation.app`, once installed) carries its own copy of the server and the page, and the server it
   starts serves that copy. After any change, rebuild, reinstall and restart in one go, then open the icon again:
