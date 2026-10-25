@@ -8,7 +8,7 @@ so you can watch them all.
 
 It answers one question at a glance: **who's waiting on me?** Look for the blue `?`.
 
-![The PKS platform: a BART train at the station, the escalator up to work, and the line of projects below](docs/screenshot.webp)
+![A train pulls into the PKS platform, the commuters get off and ride the escalator up to work, and the line of projects runs below](docs/demo.gif)
 
 It reads the files Claude Code, Codex and Cursor already keep on disk. It never writes to them, and nothing leaves
 your Mac.
