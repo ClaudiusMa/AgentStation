@@ -1,11 +1,18 @@
 # AgentStation
 
-A live train-station view of every AI coding agent running on this Mac. Each project is a station, each agent
-session is a passenger standing on its platform, and a BART train rides a loop from station to station so a screen
-left open shows you, project by project, what is working, what is waiting on you, and what has finished.
+You have agents running in five projects, and one of them has been asking you a question for twenty minutes.
+Which one? Take the train.
 
-It reads the files that Claude Code, Codex and Cursor already keep on disk. It never writes to them, and nothing
-leaves the machine.
+Every project is a station. Every agent session is a commuter on its platform, wearing a little tag: `…` still
+working, `?` waiting on you, `✓` done and nobody has read it yet. A BART train runs the loop and stops at each
+station long enough to read the tags. Then the commuters go upstairs to work, by lift or escalator, and the train
+moves on.
+Leave the tab open and it tours your whole day for you.
+
+![The PKS platform: a BART train at the station, the escalator up to work, and the line of projects below](docs/screenshot.webp)
+
+It reads the files Claude Code, Codex and Cursor already keep on disk. It never writes to them, and nothing leaves
+your Mac.
 
 macOS only. It needs Node 18 or newer (nodejs.org, or `brew install node`) and uses macOS's built-in `sqlite3`;
 there are no npm dependencies.
