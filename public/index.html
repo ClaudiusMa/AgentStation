@@ -253,6 +253,7 @@ const exiting = () => [...PEOPLE.values()].filter(p => p.ex && p.st === spareAt)
 const liftBound = () => exiting().filter(p => p.ex.via === 'lift');
 // which exit a station has: decided by how many agents it has when the train comes, and kept for the visit
 const exitFor = name => [...PEOPLE.values()].filter(p => p.st === name && p.state === 'platform').length <= LIFT_FEW ? 'lift' : 'esc';
+const exitOf = name => name === spareAt && visit.exit ? visit.exit : exitFor(name);   // the exit drawn: the visit's, else the count's
 const liftEase = u => u < .5 ? 2*u*u : 1 - 2*(1 - u)*(1 - u);
 function tickLift(dt){
   const L = lift, bound = liftBound(); L.t += dt;
@@ -496,7 +497,8 @@ function orderParts(list){
 const personPart = (x, y, svg) => ({ box: [[x - 3.8, y - 3.8, PT + .4], [x + 3.8, y + 3.8, PT + 24]], reach: [[x - 3.8, y - 16, PT + .4], [x + 12, y + 3.8, PT + 46]], kind: 'person', svg });
 function platformScene(st){
   const name = st.station || 'No agents yet', T = asTrain, me = stationOf(name);
-  let s = board(-6, -6, W + 6, D + 6, BZ, 8, BOARD);
+  // the base board runs on past the right end under the escalator, so its columns have ground to stand on
+  let s = board(-6, exitOf(name) === 'esc' ? ESC.yt - 14 : -6, W + 6, D + 6, BZ, 8, BOARD);
   // where the train is relative to this platform: it always pulls in from the near end and leaves past the far end
   let ty = null, open = 0;
   // forward is -y: the train comes in from the left of the screen and leaves to the right. One station apart on the
@@ -566,7 +568,7 @@ function platformScene(st){
 // the way out, past the left end of the platform: the lift tower or the escalator, whichever this station has, and a
 // big black sign hanging over it with the project's name in white Helvetica over the line's blue band
 function exitsScene(name, parts, figure, here){
-  const via = name === spareAt && visit.exit ? visit.exit : exitFor(name);
+  const via = exitOf(name);
   const nm = '↑ ' + name.toUpperCase().slice(0, 18);
   // the sign: a board in the air, its face toward us at x, centred on (y, z); it scales with the figure like everything else
   const floatSign = (x, y, z) => { const fs = Math.min(8.5, 66/(nm.length*.6)), w = nm.length*fs*.62 + 10, h = fs*1.9, X = x + .05;
@@ -575,11 +577,15 @@ function exitsScene(name, parts, figure, here){
         + fill(pd([[X, y - w/2 + 2, z - h/2 + 1.2], [X, y + w/2 - 2, z - h/2 + 1.2], [X, y + w/2 - 2, z - h/2 + 2.8], [X, y - w/2 + 2, z - h/2 + 2.8]]), 'var(--accent)')
         + txH(X, y, z - fs*.3 + .8, esc(nm), fs, '#f6f3ee', 700) }; };
   if (via === 'esc'){
-    // --- the escalator: up from the platform and on past its right end, on a truss over two columns, into a doorway at the top
+    // --- the escalator: up from the platform and on past its right end, on a truss over two columns standing on the base
+    // board (one under the truss, one under the doorway), into a doorway at the top
     const { x0, x1, yf, yt, rise, bal, truss } = ESC, zt = PT + rise, xi0 = x0 + 1.5, xi1 = x1 - 1.5, X = ESC_X;
     const zd = y => PT + rise*(yf - y)/(yf - yt);                                           // the deck's height along the way
     let s = '';
-    for (const y of [-8, yt + 2]) s += box(X - 3, y, 0, X + 3, y + 4, zd(y + 2) - truss + .5, DARK, tone, .8);    // the columns
+    // the columns stand on the base board past the platform's end, so they are behind the platform: each sorts on its own,
+    // below the deck (so the near balustrade covers its top) and past the platform (so the platform covers its foot)
+    for (const y of [-10, yt - 7]) parts.push({ box: [[X - 3, y, BZ], [X + 3, y + 4, PT - .01]],
+      svg: box(X - 3, y, BZ, X + 3, y + 4, zd(Math.max(y + 2, yt)) - truss + .5, DARK, tone, .8) });
     s += shape([[xi0, yf, PT], [xi0, yt, zt], [xi0, yt, zt + bal], [xi0, yf, PT + bal]], CONC.m, .8)             // far balustrade, inside
       + shape([[x0, yf, PT + bal], [xi0, yf, PT + bal], [xi0, yt, zt + bal], [x0, yt, zt + bal]], DARK.m, .7)
       + shape([[xi0, yf, PT], [xi1, yf, PT], [xi1, yt, zt], [xi0, yt, zt]], CARM.d, .9);                          // the steps
@@ -589,8 +595,7 @@ function exitsScene(name, parts, figure, here){
     for (const p of riders){ const fig = figure(p); s += p.y < yt + 4 ? clipTo([[p.x, yt, -80], [p.x, yt + 300, -80], [p.x, yt + 300, 300], [p.x, yt, 300]], fig) : fig; }
     // the near side: the balustrade, and under it the truss, solid on the platform then a beam beyond its end
     s += shape([[x1, yf, PT], [x1, 0, PT], [x1, 0, zd(0) - truss], [x1, yt, zt - truss], [x1, yt, zt + bal], [x1, yf, PT + bal]], CONC.l, 1)
-      + shape([[xi1, yf, PT + bal], [x1, yf, PT + bal], [x1, yt, zt + bal], [xi1, yt, zt + bal]], DARK.m, .7)
-      + `<path d="${pd([[x1, 0, PT], [x1, yt, zt]], false)}" stroke="${INK}" stroke-width=".7" opacity=".5"/>`;
+      + shape([[xi1, yf, PT + bal], [x1, yf, PT + bal], [x1, yt, zt + bal], [xi1, yt, zt + bal]], DARK.m, .7);
     // the sorting box starts at the platform's surface, so the foot and the steps over the platform draw over it (the columns past
     // its end stand clear of it)
     parts.push({ box: [[x0, yt, PT], [x1, yf, zt + bal]], svg: s });
